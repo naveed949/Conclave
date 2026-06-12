@@ -1,152 +1,82 @@
 import { Request, Response } from 'express';
-import Book, { IBook } from '../models/book';
+import { RaftNode, NotLeaderError } from '../consensus/raftNode';
+import {
+    buildAddCommand,
+    buildBorrowCommand,
+    buildDeleteCommand,
+    buildReturnCommand,
+    buildUpdateCommand,
+} from '../models/book';
 
-// @desc    Get all books
-// @route   GET /books
-// @access  Public
-export const getBooks = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const books: IBook[] = await Book.find();
-        res.json(books);
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ message: 'Server error' });
-    }
-};
-
-// @desc    Add a book
-// @route   POST /books
-// @access  Public
-export const addBook = async (req: Request, res: Response): Promise<void> => {
-    const { title, author, publisher, isbn, copies } = req.body;
-
-    try {
-        const newBook: IBook = new Book({
-            title,
-            author,
-            publisher,
-            isbn,
-            copies,
-        });
-
-        await newBook.save();
-        res.json(newBook);
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ message: 'Server error' });
-    }
-};
-
-// @desc    Update a book
-// @route   PUT /books/:id
-// @access  Public
-export const updateBook = async (req: Request, res: Response): Promise<void> => {
-    const { title, author, publisher, isbn, copies } = req.body;
-
-    try {
-        const book: IBook | null = await Book.findById(req.params.id);
-
-        if (!book) {
-            res.status(404).json({ message: 'Book not found' });
-            return;
+/**
+ * The controller is a thin adapter between HTTP and the consensus layer.
+ * Reads are served from the local replicated state machine (eventually
+ * consistent). Writes are proposed to the Raft log via the leader; if this
+ * node is a follower, the client is told where the leader is (421).
+ */
+export function createBookController(node: RaftNode) {
+    /** Propose a write command, await commit, and relay the result. */
+    const propose = async (res: Response, build: () => ReturnType<typeof buildDeleteCommand>) => {
+        try {
+            const result = await node.submit(build());
+            if (result.book) {
+                res.status(result.status).json(result.book);
+            } else {
+                res.status(result.status).json({ message: result.message });
+            }
+        } catch (err) {
+            if (err instanceof NotLeaderError) {
+                res.status(421).json({ message: 'Not the leader — retry against the leader', leader: err.leaderId });
+                return;
+            }
+            console.error(err);
+            res.status(500).json({ message: 'Server error' });
         }
+    };
 
-        book.title = title || book.title;
-        book.author = author || book.author;
-        book.publisher = publisher || book.publisher;
-        book.isbn = isbn || book.isbn;
-        book.copies = copies || book.copies;
+    return {
+        // GET /books — served locally from this node's state machine.
+        getBooks: async (_req: Request, res: Response): Promise<void> => {
+            res.json(node.stateMachine.getAll());
+        },
 
-        await book.save();
-        res.json(book);
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ message: 'Server error' });
-    }
-};
+        // GET /books/:id
+        getBook: async (req: Request, res: Response): Promise<void> => {
+            const book = node.stateMachine.get(req.params.id);
+            if (!book) {
+                res.status(404).json({ message: 'Book not found' });
+                return;
+            }
+            res.json(book);
+        },
 
-// @desc    Delete a book
-// @route   DELETE /books/:id
-// @access  Public
-export const deleteBook = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const book: IBook | null = await Book.findById(req.params.id);
+        // POST /books
+        addBook: async (req: Request, res: Response): Promise<void> => {
+            const { title, author, publisher, isbn, copies } = req.body;
+            await propose(res, () => buildAddCommand({ title, author, publisher, isbn, copies }));
+        },
 
-        if (!book) {
-            res.status(404).json({ message: 'Book not found' });
-            return;
-        }
+        // PUT /books/:id
+        updateBook: async (req: Request, res: Response): Promise<void> => {
+            const { title, author, publisher, isbn, copies } = req.body;
+            await propose(res, () => buildUpdateCommand(req.params.id, { title, author, publisher, isbn, copies }));
+        },
 
-        await book.deleteOne()
-        res.json({ message: 'Book removed' });
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ message: 'Server error' });
-    }
-};
+        // DELETE /books/:id
+        deleteBook: async (req: Request, res: Response): Promise<void> => {
+            await propose(res, () => buildDeleteCommand(req.params.id));
+        },
 
-// @desc    Borrow a book
-// @route   PUT /books/borrow/:id
-// @access  Public
-export const borrowBook = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const book: IBook | null = await Book.findById(req.params.id);
+        // PUT /books/borrow/:id
+        borrowBook: async (req: Request, res: Response): Promise<void> => {
+            await propose(res, () => buildBorrowCommand(req.params.id, req.body.borrowedBy));
+        },
 
-        if (!book) {
-            res.status(404).json({ message: 'Book not found' });
-            return;
-        }
+        // PUT /books/return/:id
+        returnBook: async (req: Request, res: Response): Promise<void> => {
+            await propose(res, () => buildReturnCommand(req.params.id));
+        },
+    };
+}
 
-        if (book.copies <= 0) {
-            res.status(400).json({ message: 'All copies of this book are currently borrowed' });
-            return;
-        }
-
-        const borrowedBy: string = req.body.borrowedBy;
-        const borrowedDate: Date = new Date();
-        const dueDate: Date = new Date();
-        dueDate.setDate(dueDate.getDate() + 7); // set due date to 7 days from today
-
-        book.copies--;
-        book.borrowedBy = borrowedBy;
-        book.borrowedDate = borrowedDate;
-        book.dueDate = dueDate;
-
-        await book.save();
-        res.json(book);
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ message: 'Server error' });
-    }
-};
-
-// @desc    Return a borrowed book
-// @route   PUT /books/return/:id
-// @access  Public
-export const returnBook = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const book: IBook | null = await Book.findById(req.params.id);
-
-        if (!book) {
-            res.status(404).json({ message: 'Book not found' });
-            return;
-        }
-
-        if (book.copies >= 10) { // assuming maximum number of copies is 10
-            res.status(400).json({ message: 'Cannot return book as all copies have been returned' });
-            return;
-        }
-
-        book.copies++;
-        book.borrowedBy = null;
-        book.borrowedDate = null;
-        book.dueDate = null;
-
-        await book.save();
-        res.json(book);
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ message: 'Server error' });
-    }
-};
-
+export type BookController = ReturnType<typeof createBookController>;
