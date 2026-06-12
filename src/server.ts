@@ -1,31 +1,28 @@
 import dotenv from 'dotenv';
-import express, { Application } from 'express';
-import mongoose, {ConnectOptions} from 'mongoose';
-import bodyParser from 'body-parser';
-import cors from 'cors';
-import bookRoutes from './routes/bookRoutes';
+import { createApp } from './app';
+import { RaftNode } from './consensus/raftNode';
+import { HttpTransport } from './consensus/transport';
+import { getPort, loadRaftConfig } from './consensus/config';
 
 dotenv.config();
 
-// Set up the Express app
-const app: Application = express();
+const config = loadRaftConfig();
+const node = new RaftNode(config, new HttpTransport());
+const app = createApp(node);
 
-// Set up middleware
-app.use(bodyParser.json());
-app.use(cors());
+const PORT = getPort();
 
-// Set up routes
-app.use('/books', bookRoutes);
+const server = app.listen(PORT, () => {
+    console.log(`Node "${config.id}" listening on port ${PORT} with ${config.peers.length} peer(s)`);
+    node.start();
+});
 
-// Set up the MongoDB connection
-const mongoURI = process.env.MONGO_URI || 'mongodb://localhost:27017/library';
+const shutdown = () => {
+    node.stop();
+    server.close(() => process.exit(0));
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
-mongoose
-    .connect(mongoURI)
-    .then(() => console.log('MongoDB connected...'))
-    .catch((err) => console.log(err));
-
-// Set up the server
-const PORT = process.env.PORT || 3000;
-// app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+export { app, node };
 export default app;
