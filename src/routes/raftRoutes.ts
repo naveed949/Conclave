@@ -13,6 +13,10 @@ export default function raftRoutes(node: RaftNode) {
         res.json(node.handleAppendEntries(req.body));
     });
 
+    router.post('/install-snapshot', (req, res) => {
+        res.json(node.handleInstallSnapshot(req.body));
+    });
+
     router.get('/status', (_req, res) => {
         res.json(node.status());
     });

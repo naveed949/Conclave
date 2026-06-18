@@ -36,7 +36,7 @@ elect a new leader and writes continue.
 | State machine | `src/consensus/stateMachine.ts` | Deterministic book store; applies committed commands |
 | Transport | `src/consensus/transport.ts` | `HttpTransport` (real network) / `LocalTransport` (in-process tests) |
 | Commands | `src/models/book.ts` | Build replicable commands; leader resolves ids/timestamps up front |
-| Persistence | `src/consensus/storage.ts` | Durable term/vote/log (file or in-memory) |
+| Persistence | `src/consensus/storage.ts` | Durable term/vote/log + snapshots (file or in-memory) |
 | Platform | `src/platform/` | Logging, metrics, request-context/tracing, audit, leader-forwarding |
 | HTTP API | `src/controllers`, `src/routes`, `src/app.ts` | Adapts REST ↔ consensus |
 | Entry point | `src/server.ts` | Wires a node from env and starts it |
@@ -85,9 +85,13 @@ the consensus core, so any app built on it inherits them for free.
   single write is correlatable across every node.
 
 **Fault tolerance**
-- **Persistence** (`storage.ts`) — `currentTerm`, `votedFor`, and the log are
-  written to disk (atomic rename) on every mutation and reloaded on restart, so a
+- **Persistence** (`storage.ts`) — `currentTerm`, `votedFor`, the log, and
+  snapshots are written to disk (atomic rename) and reloaded on restart, so a
   crash can't violate Raft safety. Tests use an in-memory implementation.
+- **Log compaction** (snapshotting) — once the in-memory log passes
+  `SNAPSHOT_THRESHOLD`, a node snapshots its state machine and discards the
+  covered log entries, so the log stays bounded. A follower that has fallen
+  behind the leader's snapshot is caught up with an **InstallSnapshot** RPC.
 - **Idempotency** — every write carries a `requestId`; a replayed id returns the
   original result without re-applying, turning at-least-once client retries into
   exactly-once effects.
@@ -136,7 +140,9 @@ data survives.
 | `PEERS` | `""` | Other nodes as `id@url` CSV |
 | `ELECTION_MIN_MS` / `ELECTION_MAX_MS` | `150` / `300` | Election timeout window |
 | `HEARTBEAT_MS` | `50` | Leader heartbeat interval |
-| `RAFT_DEBUG` | `false` | Log role changes |
+| `SNAPSHOT_THRESHOLD` | `1000` | Compact the log after this many in-memory entries |
+| `DATA_DIR` | `./data` | Where durable state/snapshots are written |
+| `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | Logging verbosity / format (`pretty`) |
 
 ## Tests
 
@@ -149,13 +155,15 @@ yarn test
 - `tests/bookApi.test.ts` — the REST API against a single-node cluster.
 - `tests/platform.test.ts` — audit hash-chain + tamper detection, idempotency,
   persistence across restart, and the `/audit` `/metrics` `/ready` endpoints.
+- `tests/snapshot.test.ts` — log compaction, InstallSnapshot catch-up of a
+  lagging follower, and snapshot restore on restart.
 
 Tests use `LocalTransport`, so they need no sockets and no database.
 
 ## Limitations (it's a POC)
 
-- The book *state* is rebuilt by replaying the log on restart; there is no log
-  compaction / snapshotting yet, so the log grows unbounded.
 - No dynamic cluster membership changes (fixed peer list).
 - Reads are served from the local replica (eventually consistent), not linearizable.
-- The idempotency cache is unbounded (no TTL/eviction).
+- The idempotency cache and the audit log grow unbounded (the audit log is kept
+  in full inside snapshots by design; no TTL/eviction on the dedup cache).
+- Snapshots are sent in a single RPC (no chunking) — fine for a POC-sized state.

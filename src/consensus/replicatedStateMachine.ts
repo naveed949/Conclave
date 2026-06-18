@@ -4,6 +4,14 @@ import { ApplyResult, AuditEntry, Book, LogEntry } from './types';
 
 const GENESIS_HASH = '0'.repeat(64);
 
+/** Serializable snapshot of the full replicated state (books + audit + dedup). */
+export interface RsmSnapshot {
+    books: Book[];
+    audit: AuditEntry[];
+    seen: [string, ApplyResult][];
+    lastHash: string;
+}
+
 /**
  * Wraps the domain {@link BookStateMachine} with two cross-cutting, generic
  * backend concerns that every node gets for free because they ride the same
@@ -77,6 +85,26 @@ export class ReplicatedStateMachine {
             prev = e.hash;
         }
         return { valid: true, length: this.audit.length };
+    }
+
+    // ---- snapshot / restore (for log compaction) ----
+
+    snapshot(): RsmSnapshot {
+        return {
+            books: this.books.getAll(),
+            audit: this.getAuditLog(),
+            seen: [...this.seen.entries()],
+            lastHash: this.lastHash,
+        };
+    }
+
+    restore(snap: RsmSnapshot): void {
+        this.books.load(snap.books);
+        this.audit.length = 0;
+        this.audit.push(...snap.audit);
+        this.seen.clear();
+        for (const [k, v] of snap.seen) this.seen.set(k, v);
+        this.lastHash = snap.lastHash;
     }
 
     // ---- domain access (delegated) ----

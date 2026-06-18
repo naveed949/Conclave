@@ -3,6 +3,8 @@ import { URL } from 'url';
 import {
     AppendEntriesArgs,
     AppendEntriesReply,
+    InstallSnapshotArgs,
+    InstallSnapshotReply,
     PeerInfo,
     RequestVoteArgs,
     RequestVoteReply,
@@ -16,12 +18,14 @@ import {
 export interface Transport {
     sendRequestVote(peer: PeerInfo, args: RequestVoteArgs): Promise<RequestVoteReply | null>;
     sendAppendEntries(peer: PeerInfo, args: AppendEntriesArgs): Promise<AppendEntriesReply | null>;
+    sendInstallSnapshot(peer: PeerInfo, args: InstallSnapshotArgs): Promise<InstallSnapshotReply | null>;
 }
 
 /** What a node must expose so transports can deliver RPCs to it. */
 export interface RpcHandler {
     handleRequestVote(args: RequestVoteArgs): RequestVoteReply;
     handleAppendEntries(args: AppendEntriesArgs): AppendEntriesReply;
+    handleInstallSnapshot(args: InstallSnapshotArgs): InstallSnapshotReply;
 }
 
 /** Minimal JSON POST over Node's http module (no external deps). */
@@ -79,6 +83,15 @@ export class HttpTransport implements Transport {
             return null;
         }
     }
+
+    async sendInstallSnapshot(peer: PeerInfo, args: InstallSnapshotArgs): Promise<InstallSnapshotReply | null> {
+        try {
+            // Snapshots can be large; allow more time than a heartbeat RPC.
+            return await postJson<InstallSnapshotReply>(`${peer.url}/raft/install-snapshot`, args, this.rpcTimeoutMs * 10);
+        } catch {
+            return null;
+        }
+    }
 }
 
 /**
@@ -105,5 +118,9 @@ export class LocalTransport implements Transport {
 
     sendAppendEntries(peer: PeerInfo, args: AppendEntriesArgs): Promise<AppendEntriesReply | null> {
         return this.deliver(peer.id, (h) => h.handleAppendEntries(args));
+    }
+
+    sendInstallSnapshot(peer: PeerInfo, args: InstallSnapshotArgs): Promise<InstallSnapshotReply | null> {
+        return this.deliver(peer.id, (h) => h.handleInstallSnapshot(args));
     }
 }

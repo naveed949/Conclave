@@ -99,14 +99,16 @@ export class MetricsRegistry {
     readonly raftIsLeader = new Gauge('raft_is_leader', '1 if this node is the leader');
     readonly raftCommitIndex = new Gauge('raft_commit_index', 'Highest committed log index');
     readonly raftLastApplied = new Gauge('raft_last_applied', 'Highest applied log index');
-    readonly raftLogLength = new Gauge('raft_log_length', 'Number of entries in the log');
+    readonly raftLogLength = new Gauge('raft_log_length', 'Number of in-memory log entries (post-compaction)');
+    readonly raftSnapshotIndex = new Gauge('raft_snapshot_index', 'Last log index included in the latest snapshot');
     readonly raftReplicationLag = new Gauge('raft_replication_lag', 'Entries a follower is behind the leader');
     readonly booksTotal = new Gauge('books_total', 'Books currently in the state machine');
 
     private collectors: Collector[] = [];
     private metrics = [
         this.httpRequests, this.httpDuration, this.raftElections, this.raftTerm, this.raftIsLeader,
-        this.raftCommitIndex, this.raftLastApplied, this.raftLogLength, this.raftReplicationLag, this.booksTotal,
+        this.raftCommitIndex, this.raftLastApplied, this.raftLogLength, this.raftSnapshotIndex,
+        this.raftReplicationLag, this.booksTotal,
     ];
 
     registerCollector(c: Collector): void {
