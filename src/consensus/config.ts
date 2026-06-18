@@ -31,7 +31,6 @@ export function loadRaftConfig(env: NodeJS.ProcessEnv = process.env): RaftConfig
         electionMinMs: env.ELECTION_MIN_MS ? Number(env.ELECTION_MIN_MS) : undefined,
         electionMaxMs: env.ELECTION_MAX_MS ? Number(env.ELECTION_MAX_MS) : undefined,
         heartbeatMs: env.HEARTBEAT_MS ? Number(env.HEARTBEAT_MS) : undefined,
-        debug: env.RAFT_DEBUG === 'true',
     };
 }
 

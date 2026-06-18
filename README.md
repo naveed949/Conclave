@@ -36,6 +36,8 @@ elect a new leader and writes continue.
 | State machine | `src/consensus/stateMachine.ts` | Deterministic book store; applies committed commands |
 | Transport | `src/consensus/transport.ts` | `HttpTransport` (real network) / `LocalTransport` (in-process tests) |
 | Commands | `src/models/book.ts` | Build replicable commands; leader resolves ids/timestamps up front |
+| Persistence | `src/consensus/storage.ts` | Durable term/vote/log (file or in-memory) |
+| Platform | `src/platform/` | Logging, metrics, request-context/tracing, audit, leader-forwarding |
 | HTTP API | `src/controllers`, `src/routes`, `src/app.ts` | Adapts REST ↔ consensus |
 | Entry point | `src/server.ts` | Wires a node from env and starts it |
 
@@ -49,16 +51,52 @@ applies an identical command and stays consistent.
 |--------|-------|-------|
 | `GET` | `/books` | List all books (served from local replica) |
 | `GET` | `/books/:id` | Get one book |
-| `POST` | `/books` | Add a book — **leader only**, else `421` with leader hint |
-| `PUT` | `/books/:id` | Update provided fields — leader only |
-| `DELETE` | `/books/:id` | Delete a book — leader only |
-| `PUT` | `/books/borrow/:id` | Borrow (decrement copies) — leader only |
-| `PUT` | `/books/return/:id` | Return (increment copies) — leader only |
+| `POST` | `/books` | Add a book (write — forwarded to leader) |
+| `PUT` | `/books/:id` | Update provided fields (write) |
+| `DELETE` | `/books/:id` | Delete a book (write) |
+| `PUT` | `/books/borrow/:id` | Borrow (decrement copies) (write) |
+| `PUT` | `/books/return/:id` | Return (increment copies) (write) |
+| `GET` | `/audit` | Replicated, hash-chained audit trail (`?actor=`, `?type=`) |
+| `GET` | `/audit/verify` | Verify the audit hash chain is intact |
+| `GET` | `/metrics` | Prometheus metrics (raft + HTTP) |
+| `GET` | `/health` | Liveness + node status |
+| `GET` | `/ready` | Readiness (200 once a leader is known, else 503) |
 | `GET` | `/raft/status` | Node role, term, leader, log/commit indices |
-| `GET` | `/health` | Health + status |
 
-Writes sent to a follower return `421` with `{ "leader": "<id>" }` so the client
-can retry against the leader.
+A **write** can be sent to any node: a follower transparently **forwards** it to
+the leader. If no leader is currently known it returns `421` with
+`{ "leader": "<id>" }` so the client can retry.
+
+## Built-in platform concerns
+
+These cross-cutting backend concerns live in `src/platform/` and are wired into
+the consensus core, so any app built on it inherits them for free.
+
+**Observability**
+- **Structured logs** (`logger.ts`) — one JSON object per line, auto-tagged with
+  node id, role/term, and the request's `requestId`/`actor`. `LOG_FORMAT=pretty`
+  for human-readable local output.
+- **Metrics** (`metrics.ts`) — `/metrics` in Prometheus format, exposing both
+  HTTP signals (`http_requests_total`, `http_request_duration_ms`) and
+  consensus signals you don't normally get: `raft_is_leader`, `raft_term`,
+  `raft_commit_index`, elections count, and **`raft_replication_lag`** per follower.
+- **Tracing** (`requestContext.ts`) — an inbound/generated `X-Request-Id` is
+  propagated through HTTP → log → committed command via `AsyncLocalStorage`, so a
+  single write is correlatable across every node.
+
+**Fault tolerance**
+- **Persistence** (`storage.ts`) — `currentTerm`, `votedFor`, and the log are
+  written to disk (atomic rename) on every mutation and reloaded on restart, so a
+  crash can't violate Raft safety. Tests use an in-memory implementation.
+- **Idempotency** — every write carries a `requestId`; a replayed id returns the
+  original result without re-applying, turning at-least-once client retries into
+  exactly-once effects.
+- **Leader forwarding** + `/ready` for load-balancer health checks.
+
+**Audit** — the replicated log *is* the audit trail. Each committed change is
+recorded as a **hash-chained** entry (`{ actor, requestId, timestamp, prevHash,
+hash }`); altering any past entry breaks the chain (`GET /audit/verify`), and
+because it's replicated across a majority it's tamper-evident cluster-wide.
 
 ## Running a cluster locally
 
@@ -109,12 +147,15 @@ yarn test
 - `tests/consensus.test.ts` — 3-node in-process cluster: single-leader election,
   write replication to every node, log convergence, and **leader failover**.
 - `tests/bookApi.test.ts` — the REST API against a single-node cluster.
+- `tests/platform.test.ts` — audit hash-chain + tamper detection, idempotency,
+  persistence across restart, and the `/audit` `/metrics` `/ready` endpoints.
 
 Tests use `LocalTransport`, so they need no sockets and no database.
 
 ## Limitations (it's a POC)
 
-- State and the Raft log are **in-memory only** — restarting a node loses its log
-  (a real implementation persists `currentTerm`, `votedFor`, and the log to disk).
-- No log compaction / snapshotting, no dynamic membership changes.
+- The book *state* is rebuilt by replaying the log on restart; there is no log
+  compaction / snapshotting yet, so the log grows unbounded.
+- No dynamic cluster membership changes (fixed peer list).
 - Reads are served from the local replica (eventually consistent), not linearizable.
+- The idempotency cache is unbounded (no TTL/eviction).

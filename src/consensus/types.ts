@@ -36,6 +36,32 @@ export type Command =
 export interface LogEntry {
     term: number;
     command: Command;
+    /** Leader-assigned metadata, replicated with the command (audit + idempotency). */
+    meta?: CommandMeta;
+}
+
+/**
+ * Metadata attached by the leader before a command enters the log. Replicated
+ * verbatim so every node sees the same actor/requestId/timestamp — the basis
+ * for the audit trail and idempotent retries.
+ */
+export interface CommandMeta {
+    requestId: string;
+    actor: string;
+    timestamp: string; // ISO, leader-assigned
+}
+
+/** One tamper-evident record in the replicated audit log. */
+export interface AuditEntry {
+    index: number;
+    term: number;
+    type: Command['type'];
+    actor: string;
+    requestId: string;
+    timestamp: string;
+    status: number;
+    prevHash: string;
+    hash: string;
 }
 
 /** The outcome of applying a command to the state machine. */
