@@ -98,7 +98,8 @@ the consensus core, so any app built on it inherits them for free.
   behind the leader's snapshot is caught up with an **InstallSnapshot** RPC.
 - **Idempotency** — every write carries a `requestId`; a replayed id returns the
   original result without re-applying, turning at-least-once client retries into
-  exactly-once effects.
+  exactly-once effects. The dedup cache is **bounded** (`DEDUP_LIMIT`, default
+  10,000) with deterministic FIFO eviction, so it never grows without limit.
 - **Leader forwarding** + `/ready` for load-balancer health checks.
 
 **Audit** — the replicated log *is* the audit trail. Each committed change is
@@ -145,6 +146,7 @@ data survives.
 | `ELECTION_MIN_MS` / `ELECTION_MAX_MS` | `150` / `300` | Election timeout window |
 | `HEARTBEAT_MS` | `50` | Leader heartbeat interval |
 | `SNAPSHOT_THRESHOLD` | `1000` | Compact the log after this many in-memory entries |
+| `DEDUP_LIMIT` | `10000` | Max remembered `requestId`s for idempotency (FIFO eviction) |
 | `DATA_DIR` | `./data` | Where durable state/snapshots are written |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / `json` | Logging verbosity / format (`pretty`) |
 
@@ -168,6 +170,7 @@ Tests use `LocalTransport`, so they need no sockets and no database.
 
 - No dynamic cluster membership changes (fixed peer list).
 - Reads are served from the local replica (eventually consistent), not linearizable.
-- The idempotency cache and the audit log grow unbounded (the audit log is kept
-  in full inside snapshots by design; no TTL/eviction on the dedup cache).
+- The audit log grows unbounded (kept in full inside snapshots by design). The
+  idempotency cache is bounded (`DEDUP_LIMIT`, FIFO), so a retry older than the
+  window re-applies rather than being deduped.
 - Snapshots are sent in a single RPC (no chunking) — fine for a POC-sized state.

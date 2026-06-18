@@ -4,6 +4,9 @@ import { ApplyResult, AuditEntry, Book, LogEntry } from './types';
 
 const GENESIS_HASH = '0'.repeat(64);
 
+/** Default cap on the idempotency dedup cache (number of remembered requestIds). */
+export const DEFAULT_DEDUP_LIMIT = 10_000;
+
 /** Serializable snapshot of the full replicated state (books + audit + dedup). */
 export interface RsmSnapshot {
     books: Book[];
@@ -23,12 +26,25 @@ export interface RsmSnapshot {
  *  - **Idempotency**: commands carry a requestId; a replayed requestId returns
  *    the original result without re-applying, turning at-least-once delivery
  *    into exactly-once effects (key for fault-tolerant client retries).
+ *
+ * The dedup cache is bounded ({@link DEFAULT_DEDUP_LIMIT}) so it — and therefore
+ * the snapshots it is folded into — cannot grow without limit. Eviction is
+ * **insertion-order FIFO**, which is deterministic: every node applies the same
+ * commands in the same order, so each evicts the same entries and replicas stay
+ * identical. (A wall-clock TTL would *not* be deterministic and would diverge
+ * the cluster.) The trade-off: a retry of a request older than the window is no
+ * longer deduped and re-applies — acceptable, since realistic retries are recent.
  */
 export class ReplicatedStateMachine {
     private readonly books = new BookStateMachine();
     private readonly audit: AuditEntry[] = [];
     private readonly seen = new Map<string, ApplyResult>();
     private lastHash = GENESIS_HASH;
+    private readonly dedupLimit: number;
+
+    constructor(dedupLimit: number = DEFAULT_DEDUP_LIMIT) {
+        this.dedupLimit = dedupLimit > 0 ? dedupLimit : DEFAULT_DEDUP_LIMIT;
+    }
 
     /** Apply a committed log entry at `index`. Deterministic across nodes. */
     apply(index: number, entry: LogEntry): ApplyResult {
@@ -59,8 +75,18 @@ export class ReplicatedStateMachine {
             this.audit.push(record);
         }
 
-        if (meta?.requestId) this.seen.set(meta.requestId, result);
+        if (meta?.requestId) this.remember(meta.requestId, result);
         return result;
+    }
+
+    /** Record a result, evicting the oldest entries (FIFO) past the cap. */
+    private remember(requestId: string, result: ApplyResult): void {
+        this.seen.set(requestId, result);
+        while (this.seen.size > this.dedupLimit) {
+            // Map preserves insertion order, so the first key is the oldest.
+            const oldest = this.seen.keys().next().value as string;
+            this.seen.delete(oldest);
+        }
     }
 
     private hashOf(r: AuditEntry): string {
@@ -112,4 +138,7 @@ export class ReplicatedStateMachine {
     getAll(): Book[] { return this.books.getAll(); }
     get(id: string): Book | undefined { return this.books.get(id); }
     size(): number { return this.books.size(); }
+
+    /** Current number of remembered requestIds (bounded by the dedup limit). */
+    dedupCacheSize(): number { return this.seen.size; }
 }

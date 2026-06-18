@@ -26,6 +26,8 @@ export interface RaftConfig {
     heartbeatMs?: number;
     /** Take a snapshot once the in-memory log holds this many entries. */
     snapshotThreshold?: number;
+    /** Cap on the idempotency dedup cache (remembered requestIds). FIFO eviction. */
+    dedupLimit?: number;
     /** Optional observability/durability collaborators (tests omit them). */
     logger?: Logger;
     metrics?: MetricsRegistry;
@@ -62,7 +64,7 @@ export class RaftNode implements RpcHandler {
     private readonly storage: RaftStorage;
     private readonly logger?: Logger;
     private readonly metrics?: MetricsRegistry;
-    readonly stateMachine = new ReplicatedStateMachine();
+    readonly stateMachine: ReplicatedStateMachine;
 
     // Persistent state.
     private currentTerm = 0;
@@ -106,6 +108,7 @@ export class RaftNode implements RpcHandler {
         this.electionMaxMs = config.electionMaxMs ?? 300;
         this.heartbeatMs = config.heartbeatMs ?? 50;
         this.snapshotThreshold = config.snapshotThreshold ?? 1000;
+        this.stateMachine = new ReplicatedStateMachine(config.dedupLimit);
     }
 
     // ---- log index helpers (translate absolute index <-> array position) ----
@@ -193,6 +196,7 @@ export class RaftNode implements RpcHandler {
             commitIndex: this.commitIndex,
             lastApplied: this.lastApplied,
             books: this.stateMachine.size(),
+            dedupCacheSize: this.stateMachine.dedupCacheSize(),
         };
     }
 
@@ -582,6 +586,7 @@ export class RaftNode implements RpcHandler {
         m.raftLastApplied.set(this.lastApplied, { node });
         m.raftLogLength.set(this.log.length - 1, { node });
         m.raftSnapshotIndex.set(this.lastIncludedIndex, { node });
+        m.raftDedupCacheSize.set(this.stateMachine.dedupCacheSize(), { node });
         m.booksTotal.set(this.stateMachine.size(), { node });
         if (this.role === 'leader') {
             const last = this.lastLogIndex();
