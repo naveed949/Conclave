@@ -79,6 +79,12 @@ export class BookStateMachine {
         return [...this.books.values()];
     }
 
+    /** Replace all books (used when restoring from a snapshot). */
+    load(books: Book[]): void {
+        this.books.clear();
+        for (const b of books) this.books.set(b.id, { ...b });
+    }
+
     get(id: string): Book | undefined {
         const book = this.books.get(id);
         return book ? { ...book } : undefined;

@@ -1,4 +1,4 @@
-import { ReplicatedStateMachine } from './replicatedStateMachine';
+import { ReplicatedStateMachine, RsmSnapshot } from './replicatedStateMachine';
 import { MemoryStorage, RaftStorage } from './storage';
 import { RpcHandler, Transport } from './transport';
 import { Logger } from '../platform/logger';
@@ -9,6 +9,8 @@ import {
     ApplyResult,
     Command,
     CommandMeta,
+    InstallSnapshotArgs,
+    InstallSnapshotReply,
     LogEntry,
     PeerInfo,
     RequestVoteArgs,
@@ -22,6 +24,8 @@ export interface RaftConfig {
     electionMinMs?: number;
     electionMaxMs?: number;
     heartbeatMs?: number;
+    /** Take a snapshot once the in-memory log holds this many entries. */
+    snapshotThreshold?: number;
     /** Optional observability/durability collaborators (tests omit them). */
     logger?: Logger;
     metrics?: MetricsRegistry;
@@ -43,9 +47,13 @@ interface PendingProposal {
 }
 
 /**
- * A single Raft node. Implements leader election and log replication
- * (Raft paper, figure 2) on top of a pluggable transport, and applies
- * committed entries to a {@link BookStateMachine}.
+ * A single Raft node: leader election, log replication, and log compaction via
+ * snapshotting (Raft paper, figures 2 & 13), on a pluggable transport.
+ *
+ * The log is stored relative to the latest snapshot: `log[0]` is a sentinel
+ * representing the snapshot boundary (absolute index = lastIncludedIndex), and
+ * `log[p]` has absolute index `lastIncludedIndex + p`. Entries up to and
+ * including a snapshot are discarded, so the in-memory log stays bounded.
  */
 export class RaftNode implements RpcHandler {
     readonly id: string;
@@ -56,11 +64,13 @@ export class RaftNode implements RpcHandler {
     private readonly metrics?: MetricsRegistry;
     readonly stateMachine = new ReplicatedStateMachine();
 
-    // Persistent state (would be on disk in a real system).
+    // Persistent state.
     private currentTerm = 0;
     private votedFor: string | null = null;
-    /** Log is 1-indexed; index 0 is a sentinel so real entries start at 1. */
+    /** log[0] is a sentinel at absolute index `lastIncludedIndex`. */
     private log: LogEntry[] = [{ term: 0, command: { type: 'NOOP' } }];
+    private lastIncludedIndex = 0;
+    private lastIncludedTerm = 0;
 
     // Volatile state.
     private commitIndex = 0;
@@ -76,12 +86,13 @@ export class RaftNode implements RpcHandler {
     private electionTimer: NodeJS.Timeout | null = null;
     private heartbeatTimer: NodeJS.Timeout | null = null;
 
-    // Proposals awaiting commit, keyed by log index.
+    // Proposals awaiting commit, keyed by absolute log index.
     private pending = new Map<number, PendingProposal>();
 
     private readonly electionMinMs: number;
     private readonly electionMaxMs: number;
     private readonly heartbeatMs: number;
+    private readonly snapshotThreshold: number;
     private running = false;
 
     constructor(config: RaftConfig, transport: Transport) {
@@ -94,6 +105,29 @@ export class RaftNode implements RpcHandler {
         this.electionMinMs = config.electionMinMs ?? 150;
         this.electionMaxMs = config.electionMaxMs ?? 300;
         this.heartbeatMs = config.heartbeatMs ?? 50;
+        this.snapshotThreshold = config.snapshotThreshold ?? 1000;
+    }
+
+    // ---- log index helpers (translate absolute index <-> array position) ----
+
+    private lastLogIndex(): number {
+        return this.lastIncludedIndex + this.log.length - 1;
+    }
+
+    private pos(absIndex: number): number {
+        return absIndex - this.lastIncludedIndex;
+    }
+
+    private termAt(absIndex: number): number | undefined {
+        const p = this.pos(absIndex);
+        if (p < 0 || p >= this.log.length) return undefined;
+        return this.log[p].term;
+    }
+
+    private entryAt(absIndex: number): LogEntry | undefined {
+        const p = this.pos(absIndex);
+        if (p < 0 || p >= this.log.length) return undefined;
+        return this.log[p];
     }
 
     // ---- lifecycle ----
@@ -101,13 +135,29 @@ export class RaftNode implements RpcHandler {
     start(): void {
         if (this.running) return;
         this.running = true;
-        // Restore durable state so a restart can't violate Raft safety.
+
+        // Restore a snapshot first (rebuilds the state machine), then the log.
+        const snap = this.storage.loadSnapshot();
+        if (snap) {
+            this.stateMachine.restore(snap.data as RsmSnapshot);
+            this.lastIncludedIndex = snap.lastIncludedIndex;
+            this.lastIncludedTerm = snap.lastIncludedTerm;
+            this.commitIndex = snap.lastIncludedIndex;
+            this.lastApplied = snap.lastIncludedIndex;
+            this.log = [{ term: snap.lastIncludedTerm, command: { type: 'NOOP' } }];
+            this.logger?.info('restored snapshot', { lastIncludedIndex: this.lastIncludedIndex });
+        }
+
         const persisted = this.storage.load();
         if (persisted) {
             this.currentTerm = persisted.currentTerm;
             this.votedFor = persisted.votedFor;
             this.log = persisted.log;
-            this.logger?.info('restored persistent state', { term: this.currentTerm, logLength: this.log.length - 1 });
+            this.logger?.info('restored persistent state', {
+                term: this.currentTerm,
+                logEntries: this.log.length - 1,
+                lastIncludedIndex: this.lastIncludedIndex,
+            });
         }
         this.becomeFollower(this.currentTerm);
     }
@@ -137,7 +187,9 @@ export class RaftNode implements RpcHandler {
             role: this.role,
             term: this.currentTerm,
             leaderId: this.leaderId,
-            logLength: this.log.length - 1,
+            lastLogIndex: this.lastLogIndex(),
+            logEntries: this.log.length - 1,
+            snapshotIndex: this.lastIncludedIndex,
             commitIndex: this.commitIndex,
             lastApplied: this.lastApplied,
             books: this.stateMachine.size(),
@@ -164,7 +216,7 @@ export class RaftNode implements RpcHandler {
         const entry: LogEntry = { term: this.currentTerm, command, meta };
         this.log.push(entry);
         this.persist();
-        const index = this.log.length - 1;
+        const index = this.lastLogIndex();
         this.matchIndex.set(this.id, index);
         this.logger?.debug('proposed command', { index, type: command.type, requestId: meta?.requestId });
 
@@ -208,17 +260,16 @@ export class RaftNode implements RpcHandler {
         this.role = 'leader';
         this.leaderId = this.id;
         this.clearElectionTimer();
-        const nextIdx = this.log.length;
+        const nextIdx = this.lastLogIndex() + 1;
         for (const peer of this.peers) {
             this.nextIndex.set(peer.id, nextIdx);
             this.matchIndex.set(peer.id, 0);
         }
-        this.matchIndex.set(this.id, this.log.length - 1);
         this.logger?.info('became LEADER', { term: this.currentTerm });
         // Commit a no-op for this term so prior entries can be safely committed.
         this.log.push({ term: this.currentTerm, command: { type: 'NOOP' } });
         this.persist();
-        this.matchIndex.set(this.id, this.log.length - 1);
+        this.matchIndex.set(this.id, this.lastLogIndex());
         this.advanceCommitIndex();
         this.startHeartbeat();
     }
@@ -226,12 +277,11 @@ export class RaftNode implements RpcHandler {
     // ---- elections ----
 
     private async runElection(term: number): Promise<void> {
-        const lastLogIndex = this.log.length - 1;
         const args: RequestVoteArgs = {
             term,
             candidateId: this.id,
-            lastLogIndex,
-            lastLogTerm: this.log[lastLogIndex].term,
+            lastLogIndex: this.lastLogIndex(),
+            lastLogTerm: this.termAt(this.lastLogIndex())!,
         };
 
         let votes = 1; // vote for self
@@ -262,8 +312,8 @@ export class RaftNode implements RpcHandler {
     handleRequestVote(args: RequestVoteArgs): RequestVoteReply {
         if (args.term > this.currentTerm) this.becomeFollower(args.term);
 
-        const lastLogIndex = this.log.length - 1;
-        const lastLogTerm = this.log[lastLogIndex].term;
+        const lastLogIndex = this.lastLogIndex();
+        const lastLogTerm = this.termAt(lastLogIndex)!;
         const logOk =
             args.lastLogTerm > lastLogTerm ||
             (args.lastLogTerm === lastLogTerm && args.lastLogIndex >= lastLogIndex);
@@ -296,15 +346,22 @@ export class RaftNode implements RpcHandler {
 
     private async replicateTo(peer: PeerInfo): Promise<void> {
         if (this.role !== 'leader') return;
+        const nextIdx = this.nextIndex.get(peer.id) ?? this.lastLogIndex() + 1;
+
+        // The entry the follower needs has been compacted away — ship a snapshot.
+        if (nextIdx <= this.lastIncludedIndex) {
+            await this.sendSnapshot(peer);
+            return;
+        }
+
         const term = this.currentTerm;
-        const nextIdx = this.nextIndex.get(peer.id) ?? this.log.length;
         const prevLogIndex = nextIdx - 1;
         const args: AppendEntriesArgs = {
             term,
             leaderId: this.id,
             prevLogIndex,
-            prevLogTerm: this.log[prevLogIndex]?.term ?? 0,
-            entries: this.log.slice(nextIdx),
+            prevLogTerm: this.termAt(prevLogIndex) ?? this.lastIncludedTerm,
+            entries: this.log.slice(this.pos(nextIdx)),
             leaderCommit: this.commitIndex,
         };
 
@@ -322,9 +379,32 @@ export class RaftNode implements RpcHandler {
             this.nextIndex.set(peer.id, match + 1);
             this.advanceCommitIndex();
         } else {
-            // Log inconsistency: back off and retry on the next tick.
+            // Log inconsistency: back off and retry (may fall through to a snapshot).
             this.nextIndex.set(peer.id, Math.max(1, nextIdx - 1));
         }
+    }
+
+    private async sendSnapshot(peer: PeerInfo): Promise<void> {
+        const term = this.currentTerm;
+        const snapIndex = this.lastApplied;
+        const args: InstallSnapshotArgs = {
+            term,
+            leaderId: this.id,
+            lastIncludedIndex: snapIndex,
+            lastIncludedTerm: this.termAt(snapIndex) ?? this.lastIncludedTerm,
+            data: this.stateMachine.snapshot(),
+        };
+        this.logger?.info('sending snapshot', { peer: peer.id, lastIncludedIndex: snapIndex });
+
+        const reply = await this.transport.sendInstallSnapshot(peer, args);
+        if (!reply || this.role !== 'leader' || this.currentTerm !== term) return;
+        if (reply.term > this.currentTerm) {
+            this.becomeFollower(reply.term);
+            return;
+        }
+        this.matchIndex.set(peer.id, snapIndex);
+        this.nextIndex.set(peer.id, snapIndex + 1);
+        this.advanceCommitIndex();
     }
 
     handleAppendEntries(args: AppendEntriesArgs): AppendEntriesReply {
@@ -338,42 +418,78 @@ export class RaftNode implements RpcHandler {
         this.leaderId = args.leaderId;
         this.resetElectionTimer();
 
+        // Everything up to our snapshot is already durably applied.
+        if (args.prevLogIndex < this.lastIncludedIndex) {
+            return { term: this.currentTerm, success: true, matchIndex: this.lastLogIndex() };
+        }
+
         // Consistency check on the entry preceding the new ones.
-        const prev = this.log[args.prevLogIndex];
-        if (!prev || prev.term !== args.prevLogTerm) {
+        const prevTerm = this.termAt(args.prevLogIndex);
+        if (prevTerm === undefined || prevTerm !== args.prevLogTerm) {
             return { term: this.currentTerm, success: false };
         }
 
         // Append new entries, overwriting any conflicting suffix.
-        let insertAt = args.prevLogIndex + 1;
+        let p = this.pos(args.prevLogIndex + 1);
         let mutated = false;
         for (const entry of args.entries) {
-            const existing = this.log[insertAt];
+            const existing = this.log[p];
             if (existing && existing.term !== entry.term) {
-                this.log.length = insertAt; // truncate conflicting tail
+                this.log.length = p; // truncate conflicting tail
                 mutated = true;
             }
-            if (insertAt >= this.log.length) {
+            if (p >= this.log.length) {
                 this.log.push(entry);
                 mutated = true;
             }
-            insertAt += 1;
+            p += 1;
         }
         if (mutated) this.persist();
 
         if (args.leaderCommit > this.commitIndex) {
-            this.commitIndex = Math.min(args.leaderCommit, this.log.length - 1);
+            this.commitIndex = Math.min(args.leaderCommit, this.lastLogIndex());
             this.applyCommitted();
         }
 
         return { term: this.currentTerm, success: true, matchIndex: args.prevLogIndex + args.entries.length };
     }
 
+    handleInstallSnapshot(args: InstallSnapshotArgs): InstallSnapshotReply {
+        if (args.term < this.currentTerm) {
+            return { term: this.currentTerm };
+        }
+        if (args.term > this.currentTerm) this.becomeFollower(args.term);
+        this.role = 'follower';
+        this.leaderId = args.leaderId;
+        this.resetElectionTimer();
+
+        // Ignore a stale snapshot we've already surpassed.
+        if (args.lastIncludedIndex <= this.lastIncludedIndex) {
+            return { term: this.currentTerm };
+        }
+
+        this.stateMachine.restore(args.data as RsmSnapshot);
+        this.lastIncludedIndex = args.lastIncludedIndex;
+        this.lastIncludedTerm = args.lastIncludedTerm;
+        this.commitIndex = args.lastIncludedIndex;
+        this.lastApplied = args.lastIncludedIndex;
+        // Discard the entire log; the leader will re-replicate anything newer.
+        this.log = [{ term: args.lastIncludedTerm, command: { type: 'NOOP' } }];
+        this.persist();
+        this.storage.saveSnapshot({
+            lastIncludedIndex: this.lastIncludedIndex,
+            lastIncludedTerm: this.lastIncludedTerm,
+            data: args.data,
+        });
+        this.logger?.info('installed snapshot', { lastIncludedIndex: this.lastIncludedIndex });
+        return { term: this.currentTerm };
+    }
+
     /** Leader: advance commitIndex to the highest index replicated on a majority. */
     private advanceCommitIndex(): void {
-        for (let n = this.log.length - 1; n > this.commitIndex; n--) {
+        for (let n = this.lastLogIndex(); n > this.commitIndex; n--) {
             // Raft safety: only commit entries from the current term by counting.
-            if (this.log[n].term !== this.currentTerm) continue;
+            if (this.termAt(n) !== this.currentTerm) continue;
             let count = 0;
             for (const idx of this.matchIndex.values()) {
                 if (idx >= n) count += 1;
@@ -386,11 +502,11 @@ export class RaftNode implements RpcHandler {
         }
     }
 
-    /** Apply every newly-committed entry and resolve any waiting proposals. */
+    /** Apply every newly-committed entry, resolve waiting proposals, maybe snapshot. */
     private applyCommitted(): void {
         while (this.lastApplied < this.commitIndex) {
             this.lastApplied += 1;
-            const entry = this.log[this.lastApplied];
+            const entry = this.entryAt(this.lastApplied)!;
             const result = this.stateMachine.apply(this.lastApplied, entry);
 
             const waiter = this.pending.get(this.lastApplied);
@@ -400,6 +516,31 @@ export class RaftNode implements RpcHandler {
                 else waiter.reject(new NotLeaderError(this.leaderId));
             }
         }
+        this.maybeSnapshot();
+    }
+
+    // ---- log compaction ----
+
+    private maybeSnapshot(): void {
+        if (this.log.length - 1 < this.snapshotThreshold) return;
+        if (this.lastApplied <= this.lastIncludedIndex) return;
+        this.takeSnapshot();
+    }
+
+    private takeSnapshot(): void {
+        const snapIndex = this.lastApplied;
+        const snapTerm = this.termAt(snapIndex)!;
+        const data = this.stateMachine.snapshot();
+
+        // Keep the sentinel + everything after the snapshot point.
+        const tail = this.log.slice(this.pos(snapIndex) + 1);
+        this.log = [{ term: snapTerm, command: { type: 'NOOP' } }, ...tail];
+        this.lastIncludedIndex = snapIndex;
+        this.lastIncludedTerm = snapTerm;
+
+        this.persist();
+        this.storage.saveSnapshot({ lastIncludedIndex: snapIndex, lastIncludedTerm: snapTerm, data });
+        this.logger?.info('took snapshot', { lastIncludedIndex: snapIndex, remainingEntries: this.log.length - 1 });
     }
 
     // ---- timers ----
@@ -440,9 +581,10 @@ export class RaftNode implements RpcHandler {
         m.raftCommitIndex.set(this.commitIndex, { node });
         m.raftLastApplied.set(this.lastApplied, { node });
         m.raftLogLength.set(this.log.length - 1, { node });
+        m.raftSnapshotIndex.set(this.lastIncludedIndex, { node });
         m.booksTotal.set(this.stateMachine.size(), { node });
         if (this.role === 'leader') {
-            const last = this.log.length - 1;
+            const last = this.lastLogIndex();
             for (const peer of this.peers) {
                 m.raftReplicationLag.set(last - (this.matchIndex.get(peer.id) ?? 0), { node, peer: peer.id });
             }

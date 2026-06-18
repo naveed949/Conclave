@@ -101,6 +101,27 @@ export interface AppendEntriesReply {
     matchIndex?: number;
 }
 
+/** Sent by a leader to a follower that has fallen behind the leader's log snapshot. */
+export interface InstallSnapshotArgs {
+    term: number;
+    leaderId: string;
+    lastIncludedIndex: number;
+    lastIncludedTerm: number;
+    /** Serialized state-machine snapshot (opaque to the transport). */
+    data: unknown;
+}
+
+export interface InstallSnapshotReply {
+    term: number;
+}
+
+/** A point-in-time snapshot that replaces the log up to lastIncludedIndex. */
+export interface Snapshot {
+    lastIncludedIndex: number;
+    lastIncludedTerm: number;
+    data: unknown;
+}
+
 /** Identity + address of a peer node. */
 export interface PeerInfo {
     id: string;
