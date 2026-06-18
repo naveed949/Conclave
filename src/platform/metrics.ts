@@ -102,13 +102,14 @@ export class MetricsRegistry {
     readonly raftLogLength = new Gauge('raft_log_length', 'Number of in-memory log entries (post-compaction)');
     readonly raftSnapshotIndex = new Gauge('raft_snapshot_index', 'Last log index included in the latest snapshot');
     readonly raftReplicationLag = new Gauge('raft_replication_lag', 'Entries a follower is behind the leader');
+    readonly raftDedupCacheSize = new Gauge('raft_dedup_cache_size', 'Remembered requestIds in the idempotency cache (bounded)');
     readonly booksTotal = new Gauge('books_total', 'Books currently in the state machine');
 
     private collectors: Collector[] = [];
     private metrics = [
         this.httpRequests, this.httpDuration, this.raftElections, this.raftTerm, this.raftIsLeader,
         this.raftCommitIndex, this.raftLastApplied, this.raftLogLength, this.raftSnapshotIndex,
-        this.raftReplicationLag, this.booksTotal,
+        this.raftReplicationLag, this.raftDedupCacheSize, this.booksTotal,
     ];
 
     registerCollector(c: Collector): void {

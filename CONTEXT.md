@@ -98,7 +98,8 @@ command becomes "real" only once a majority of nodes hold it (the commit point).
 
 - No dynamic cluster membership changes (fixed peer list).
 - Reads are eventually consistent, not linearizable.
-- Idempotency cache and audit log grow unbounded (no TTL/eviction).
+- Audit log grows unbounded (kept in full inside snapshots by design); the
+  idempotency cache is bounded (`DEDUP_LIMIT`, deterministic FIFO eviction).
 - Snapshots transfer in a single RPC (no chunking).
 
 For production, the abstractions (`Transport`, `RaftStorage`, `MetricsRegistry`)

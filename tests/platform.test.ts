@@ -64,6 +64,41 @@ describe('Idempotency (exactly-once on retried requestId)', () => {
     });
 });
 
+describe('Idempotency cache is bounded (deterministic FIFO eviction)', () => {
+    it('caps the cache and re-applies a requestId evicted past the limit', () => {
+        const sm = new ReplicatedStateMachine(2); // remember at most 2 requestIds
+        expect(sm.apply(1, addEntry(1, 'a-1', 'r1')).status).toBe(201);
+        expect(sm.apply(2, addEntry(1, 'a-2', 'r2')).status).toBe(201);
+        expect(sm.apply(3, addEntry(1, 'a-3', 'r3')).status).toBe(201);
+
+        // FIFO: r1 (oldest) was evicted, the cache stays at the cap.
+        expect(sm.dedupCacheSize()).toBe(2);
+
+        // r3 is still cached -> replay returns the original result, no re-apply.
+        expect(sm.apply(4, addEntry(1, 'a-3', 'r3')).status).toBe(201);
+
+        // r1 was evicted -> its replay is NOT deduped, so it re-applies the ADD
+        // and now hits the duplicate-ISBN guard (proving it went through apply()).
+        expect(sm.apply(5, addEntry(1, 'a-1', 'r1')).status).toBe(400);
+
+        expect(sm.size()).toBe(3); // still only the 3 distinct books
+        expect(sm.dedupCacheSize()).toBe(2); // still bounded
+    });
+
+    it('evicts identically on every node (same sequence -> same cache)', () => {
+        const a = new ReplicatedStateMachine(3);
+        const b = new ReplicatedStateMachine(3);
+        for (let i = 1; i <= 6; i++) {
+            const entry = addEntry(1, `k-${i}`, `req-${i}`);
+            a.apply(i, entry);
+            b.apply(i, entry);
+        }
+        // Both kept exactly the last 3 requestIds, in the same order.
+        expect(a.snapshot().seen).toEqual(b.snapshot().seen);
+        expect(a.snapshot().seen.map(([id]) => id)).toEqual(['req-4', 'req-5', 'req-6']);
+    });
+});
+
 describe('Persistence (state survives restart)', () => {
     const buildNode = (storage: MemoryStorage) => {
         const registry = new Map<string, RpcHandler>();
