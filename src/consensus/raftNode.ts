@@ -1,10 +1,14 @@
-import { BookStateMachine } from './stateMachine';
+import { ReplicatedStateMachine } from './replicatedStateMachine';
+import { MemoryStorage, RaftStorage } from './storage';
 import { RpcHandler, Transport } from './transport';
+import { Logger } from '../platform/logger';
+import { MetricsRegistry } from '../platform/metrics';
 import {
     AppendEntriesArgs,
     AppendEntriesReply,
     ApplyResult,
     Command,
+    CommandMeta,
     LogEntry,
     PeerInfo,
     RequestVoteArgs,
@@ -18,8 +22,10 @@ export interface RaftConfig {
     electionMinMs?: number;
     electionMaxMs?: number;
     heartbeatMs?: number;
-    /** When false, suppress per-event logging (used by tests). */
-    debug?: boolean;
+    /** Optional observability/durability collaborators (tests omit them). */
+    logger?: Logger;
+    metrics?: MetricsRegistry;
+    storage?: RaftStorage;
 }
 
 /** Raised when a write is attempted on a non-leader node. */
@@ -45,7 +51,10 @@ export class RaftNode implements RpcHandler {
     readonly id: string;
     private readonly peers: PeerInfo[];
     private readonly transport: Transport;
-    readonly stateMachine = new BookStateMachine();
+    private readonly storage: RaftStorage;
+    private readonly logger?: Logger;
+    private readonly metrics?: MetricsRegistry;
+    readonly stateMachine = new ReplicatedStateMachine();
 
     // Persistent state (would be on disk in a real system).
     private currentTerm = 0;
@@ -73,17 +82,18 @@ export class RaftNode implements RpcHandler {
     private readonly electionMinMs: number;
     private readonly electionMaxMs: number;
     private readonly heartbeatMs: number;
-    private readonly debug: boolean;
     private running = false;
 
     constructor(config: RaftConfig, transport: Transport) {
         this.id = config.id;
         this.peers = config.peers;
         this.transport = transport;
+        this.storage = config.storage ?? new MemoryStorage();
+        this.logger = config.logger?.child({ component: 'raft', node: config.id });
+        this.metrics = config.metrics;
         this.electionMinMs = config.electionMinMs ?? 150;
         this.electionMaxMs = config.electionMaxMs ?? 300;
         this.heartbeatMs = config.heartbeatMs ?? 50;
-        this.debug = config.debug ?? false;
     }
 
     // ---- lifecycle ----
@@ -91,7 +101,20 @@ export class RaftNode implements RpcHandler {
     start(): void {
         if (this.running) return;
         this.running = true;
+        // Restore durable state so a restart can't violate Raft safety.
+        const persisted = this.storage.load();
+        if (persisted) {
+            this.currentTerm = persisted.currentTerm;
+            this.votedFor = persisted.votedFor;
+            this.log = persisted.log;
+            this.logger?.info('restored persistent state', { term: this.currentTerm, logLength: this.log.length - 1 });
+        }
         this.becomeFollower(this.currentTerm);
+    }
+
+    /** Persist the durable subset of state (term, vote, log). */
+    private persist(): void {
+        this.storage.save({ currentTerm: this.currentTerm, votedFor: this.votedFor, log: this.log });
     }
 
     stop(): void {
@@ -125,17 +148,25 @@ export class RaftNode implements RpcHandler {
         return this.leaderId;
     }
 
+    /** URL of the current leader (for write forwarding), or null if unknown/self. */
+    getLeaderUrl(): string | null {
+        if (!this.leaderId || this.leaderId === this.id) return null;
+        return this.peers.find((p) => p.id === this.leaderId)?.url ?? null;
+    }
+
     /**
      * Propose a command. Resolves once the entry is committed and applied.
      * Throws {@link NotLeaderError} if this node is not the leader.
      */
-    submit(command: Command): Promise<ApplyResult> {
+    submit(command: Command, meta?: CommandMeta): Promise<ApplyResult> {
         if (this.role !== 'leader') throw new NotLeaderError(this.leaderId);
 
-        const entry: LogEntry = { term: this.currentTerm, command };
+        const entry: LogEntry = { term: this.currentTerm, command, meta };
         this.log.push(entry);
+        this.persist();
         const index = this.log.length - 1;
         this.matchIndex.set(this.id, index);
+        this.logger?.debug('proposed command', { index, type: command.type, requestId: meta?.requestId });
 
         const promise = new Promise<ApplyResult>((resolve, reject) => {
             this.pending.set(index, { term: entry.term, resolve, reject });
@@ -155,6 +186,7 @@ export class RaftNode implements RpcHandler {
         if (term > this.currentTerm) {
             this.currentTerm = term;
             this.votedFor = null;
+            this.persist();
         }
         this.clearHeartbeatTimer();
         this.resetElectionTimer();
@@ -165,7 +197,9 @@ export class RaftNode implements RpcHandler {
         this.role = 'candidate';
         this.votedFor = this.id;
         this.leaderId = null;
-        this.log_(`became candidate for term ${this.currentTerm}`);
+        this.persist();
+        this.metrics?.raftElections.inc({ node: this.id });
+        this.logger?.info('became candidate', { term: this.currentTerm });
         this.resetElectionTimer();
         void this.runElection(this.currentTerm);
     }
@@ -180,9 +214,10 @@ export class RaftNode implements RpcHandler {
             this.matchIndex.set(peer.id, 0);
         }
         this.matchIndex.set(this.id, this.log.length - 1);
-        this.log_(`became LEADER for term ${this.currentTerm}`);
+        this.logger?.info('became LEADER', { term: this.currentTerm });
         // Commit a no-op for this term so prior entries can be safely committed.
         this.log.push({ term: this.currentTerm, command: { type: 'NOOP' } });
+        this.persist();
         this.matchIndex.set(this.id, this.log.length - 1);
         this.advanceCommitIndex();
         this.startHeartbeat();
@@ -240,6 +275,7 @@ export class RaftNode implements RpcHandler {
 
         if (grant) {
             this.votedFor = args.candidateId;
+            this.persist();
             this.resetElectionTimer();
         }
         return { term: this.currentTerm, voteGranted: grant };
@@ -310,14 +346,20 @@ export class RaftNode implements RpcHandler {
 
         // Append new entries, overwriting any conflicting suffix.
         let insertAt = args.prevLogIndex + 1;
+        let mutated = false;
         for (const entry of args.entries) {
             const existing = this.log[insertAt];
             if (existing && existing.term !== entry.term) {
                 this.log.length = insertAt; // truncate conflicting tail
+                mutated = true;
             }
-            if (insertAt >= this.log.length) this.log.push(entry);
+            if (insertAt >= this.log.length) {
+                this.log.push(entry);
+                mutated = true;
+            }
             insertAt += 1;
         }
+        if (mutated) this.persist();
 
         if (args.leaderCommit > this.commitIndex) {
             this.commitIndex = Math.min(args.leaderCommit, this.log.length - 1);
@@ -349,7 +391,7 @@ export class RaftNode implements RpcHandler {
         while (this.lastApplied < this.commitIndex) {
             this.lastApplied += 1;
             const entry = this.log[this.lastApplied];
-            const result = this.stateMachine.apply(entry.command);
+            const result = this.stateMachine.apply(this.lastApplied, entry);
 
             const waiter = this.pending.get(this.lastApplied);
             if (waiter) {
@@ -388,7 +430,22 @@ export class RaftNode implements RpcHandler {
         }
     }
 
-    private log_(msg: string): void {
-        if (this.debug) console.log(`[raft ${this.id}] ${msg}`);
+    /** Push current Raft state into the metrics registry (called at scrape time). */
+    collectMetrics(): void {
+        const m = this.metrics;
+        if (!m) return;
+        const node = this.id;
+        m.raftTerm.set(this.currentTerm, { node });
+        m.raftIsLeader.set(this.role === 'leader' ? 1 : 0, { node });
+        m.raftCommitIndex.set(this.commitIndex, { node });
+        m.raftLastApplied.set(this.lastApplied, { node });
+        m.raftLogLength.set(this.log.length - 1, { node });
+        m.booksTotal.set(this.stateMachine.size(), { node });
+        if (this.role === 'leader') {
+            const last = this.log.length - 1;
+            for (const peer of this.peers) {
+                m.raftReplicationLag.set(last - (this.matchIndex.get(peer.id) ?? 0), { node, peer: peer.id });
+            }
+        }
     }
 }
