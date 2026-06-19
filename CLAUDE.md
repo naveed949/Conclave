@@ -54,7 +54,9 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
 - **Snapshot-relative indexing:** when touching the log, go through the index
   helpers; off-by-`lastIncludedIndex` errors corrupt replication.
 - **Writes go through the leader** (followers forward); **reads are local** and
-  eventually consistent.
+  eventually consistent by default. `?consistency=strong` reads go through the
+  leader's ReadIndex barrier (`node.readBarrier()`) and must never be served from
+  a node that can't confirm leadership — fail closed (`NotLeaderError`) instead.
 
 ## Conventions
 

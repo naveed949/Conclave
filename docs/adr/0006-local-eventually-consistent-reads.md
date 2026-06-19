@@ -20,10 +20,12 @@ that hasn't yet been applied on that particular node.
 
 - Reads are fast, scale across all nodes, and stay available even on followers.
 - A read immediately after a write to a *different* node may not see it yet.
-- Adequate for the POC and for most read-heavy workloads; linearizable reads can
-  be added later as an opt-in.
+- Adequate for the POC and for most read-heavy workloads.
+- Linearizable reads were subsequently added as an **opt-in** (`?consistency=strong`)
+  in ADR-0014; this local read remains the default.
 
 ## Alternatives considered
 
 - **Leader-routed / read-index linearizable reads** — stronger guarantee but adds
-  latency and coordination; deferred as a documented limitation/follow-up.
+  latency and coordination. Later adopted as an opt-in (ADR-0014) rather than the
+  default.

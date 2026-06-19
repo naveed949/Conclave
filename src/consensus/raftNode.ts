@@ -48,6 +48,13 @@ interface PendingProposal {
     reject: (err: Error) => void;
 }
 
+interface ReadWaiter {
+    index: number;
+    resolve: () => void;
+    reject: (err: Error) => void;
+    timer: NodeJS.Timeout;
+}
+
 /**
  * A single Raft node: leader election, log replication, and log compaction via
  * snapshotting (Raft paper, figures 2 & 13), on a pluggable transport.
@@ -90,6 +97,9 @@ export class RaftNode implements RpcHandler {
 
     // Proposals awaiting commit, keyed by absolute log index.
     private pending = new Map<number, PendingProposal>();
+
+    // Linearizable-read barriers awaiting the state machine to apply through an index.
+    private readWaiters: ReadWaiter[] = [];
 
     private readonly electionMinMs: number;
     private readonly electionMaxMs: number;
@@ -176,6 +186,7 @@ export class RaftNode implements RpcHandler {
         this.clearHeartbeatTimer();
         for (const p of this.pending.values()) p.reject(new Error('node stopped'));
         this.pending.clear();
+        this.rejectReadWaiters(new Error('node stopped'));
     }
 
     // ---- public accessors (status / controller) ----
@@ -235,6 +246,80 @@ export class RaftNode implements RpcHandler {
         return promise;
     }
 
+    /**
+     * Linearizable read barrier (Raft §6.4, "ReadIndex"). Resolving it
+     * guarantees a subsequent local read reflects every write committed before
+     * the barrier was requested — without writing to the log:
+     *
+     *   1. Capture `readIndex = commitIndex` (the leader has committed a no-op
+     *      from its current term on election, so its commitIndex is current).
+     *   2. Confirm we are *still* the leader by exchanging a round of heartbeats
+     *      with a majority — proving no newer leader has superseded us.
+     *   3. Wait until the state machine has applied through `readIndex`.
+     *
+     * Throws {@link NotLeaderError} if this node is not (or ceases to be) the
+     * leader, so the caller can forward the read to the leader like a write.
+     */
+    async readBarrier(): Promise<void> {
+        if (this.role !== 'leader') throw new NotLeaderError(this.leaderId);
+        const readIndex = this.commitIndex;
+        const confirmed = await this.confirmLeadership();
+        if (!confirmed || this.role !== 'leader') throw new NotLeaderError(this.leaderId);
+        this.metrics?.raftReadBarriers.inc({ node: this.id });
+        await this.waitForApplied(readIndex);
+    }
+
+    /**
+     * Exchange one round of AppendEntries with the peers and report whether a
+     * majority still acknowledge our leadership for the current term. A reply
+     * that doesn't carry a higher term counts as an acknowledgement even if it
+     * reports a log mismatch — the follower still recognises us as leader.
+     */
+    private async confirmLeadership(): Promise<boolean> {
+        const majority = Math.floor((this.peers.length + 1) / 2) + 1;
+        if (majority <= 1) return true; // single-node cluster is its own majority
+        const term = this.currentTerm;
+        const acks = await Promise.all(this.peers.map((peer) => this.replicateTo(peer)));
+        if (this.role !== 'leader' || this.currentTerm !== term) return false;
+        const confirmed = 1 + acks.filter(Boolean).length; // +1 for self
+        return confirmed >= majority;
+    }
+
+    private waitForApplied(index: number): Promise<void> {
+        if (this.lastApplied >= index) return Promise.resolve();
+        return new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this.readWaiters = this.readWaiters.filter((w) => w.timer !== timer);
+                reject(new Error('READ_BARRIER_TIMEOUT'));
+            }, 2000);
+            this.readWaiters.push({ index, resolve, reject, timer });
+        });
+    }
+
+    private resolveReadWaiters(): void {
+        if (this.readWaiters.length === 0) return;
+        const remaining: ReadWaiter[] = [];
+        for (const w of this.readWaiters) {
+            if (this.lastApplied >= w.index) {
+                clearTimeout(w.timer);
+                w.resolve();
+            } else {
+                remaining.push(w);
+            }
+        }
+        this.readWaiters = remaining;
+    }
+
+    private rejectReadWaiters(err: Error): void {
+        if (this.readWaiters.length === 0) return;
+        const waiters = this.readWaiters;
+        this.readWaiters = [];
+        for (const w of waiters) {
+            clearTimeout(w.timer);
+            w.reject(err);
+        }
+    }
+
     // ---- role transitions ----
 
     private becomeFollower(term: number): void {
@@ -246,6 +331,8 @@ export class RaftNode implements RpcHandler {
         }
         this.clearHeartbeatTimer();
         this.resetElectionTimer();
+        // Reads in flight can no longer be served linearizably from this node.
+        this.rejectReadWaiters(new NotLeaderError(this.leaderId));
     }
 
     private becomeCandidate(): void {
@@ -348,14 +435,14 @@ export class RaftNode implements RpcHandler {
         for (const peer of this.peers) void this.replicateTo(peer);
     }
 
-    private async replicateTo(peer: PeerInfo): Promise<void> {
-        if (this.role !== 'leader') return;
+    /** Returns true if the peer acknowledged our leadership for the current term. */
+    private async replicateTo(peer: PeerInfo): Promise<boolean> {
+        if (this.role !== 'leader') return false;
         const nextIdx = this.nextIndex.get(peer.id) ?? this.lastLogIndex() + 1;
 
         // The entry the follower needs has been compacted away — ship a snapshot.
         if (nextIdx <= this.lastIncludedIndex) {
-            await this.sendSnapshot(peer);
-            return;
+            return this.sendSnapshot(peer);
         }
 
         const term = this.currentTerm;
@@ -370,11 +457,11 @@ export class RaftNode implements RpcHandler {
         };
 
         const reply = await this.transport.sendAppendEntries(peer, args);
-        if (!reply || this.role !== 'leader' || this.currentTerm !== term) return;
+        if (!reply || this.role !== 'leader' || this.currentTerm !== term) return false;
 
         if (reply.term > this.currentTerm) {
             this.becomeFollower(reply.term);
-            return;
+            return false;
         }
 
         if (reply.success) {
@@ -386,9 +473,12 @@ export class RaftNode implements RpcHandler {
             // Log inconsistency: back off and retry (may fall through to a snapshot).
             this.nextIndex.set(peer.id, Math.max(1, nextIdx - 1));
         }
+        // Either way the follower recognised us as leader for this term.
+        return true;
     }
 
-    private async sendSnapshot(peer: PeerInfo): Promise<void> {
+    /** Returns true if the peer acknowledged our leadership for the current term. */
+    private async sendSnapshot(peer: PeerInfo): Promise<boolean> {
         const term = this.currentTerm;
         const snapIndex = this.lastApplied;
         const args: InstallSnapshotArgs = {
@@ -401,14 +491,15 @@ export class RaftNode implements RpcHandler {
         this.logger?.info('sending snapshot', { peer: peer.id, lastIncludedIndex: snapIndex });
 
         const reply = await this.transport.sendInstallSnapshot(peer, args);
-        if (!reply || this.role !== 'leader' || this.currentTerm !== term) return;
+        if (!reply || this.role !== 'leader' || this.currentTerm !== term) return false;
         if (reply.term > this.currentTerm) {
             this.becomeFollower(reply.term);
-            return;
+            return false;
         }
         this.matchIndex.set(peer.id, snapIndex);
         this.nextIndex.set(peer.id, snapIndex + 1);
         this.advanceCommitIndex();
+        return true;
     }
 
     handleAppendEntries(args: AppendEntriesArgs): AppendEntriesReply {
@@ -520,6 +611,7 @@ export class RaftNode implements RpcHandler {
                 else waiter.reject(new NotLeaderError(this.leaderId));
             }
         }
+        this.resolveReadWaiters();
         this.maybeSnapshot();
     }
 

@@ -53,8 +53,12 @@ command becomes "real" only once a majority of nodes hold it (the commit point).
    entry (hash-chained) and the result for idempotency. The leader resolves the
    client's pending request with the applied result.
 
-**Read** (`GET`): served directly from the receiving node's local replica
-(eventually consistent — fast and available on any node).
+**Read** (`GET`): by default served directly from the receiving node's local
+replica (eventually consistent — fast and available on any node). With
+`?consistency=strong` it instead goes through the leader's **ReadIndex barrier**
+(leadership confirmed via a heartbeat quorum, then it waits until the read index
+is applied) for a linearizable result; followers forward strong reads to the
+leader just like writes.
 
 ## Key concepts (glossary)
 
@@ -97,7 +101,8 @@ command becomes "real" only once a majority of nodes hold it (the commit point).
 (See the "Limitations" section of the README and the relevant ADRs.)
 
 - No dynamic cluster membership changes (fixed peer list).
-- Reads are eventually consistent, not linearizable.
+- Reads are eventually consistent by default; linearizable reads are opt-in via
+  `?consistency=strong` (leader-routed, no follower offloading or leases).
 - Audit log grows unbounded (kept in full inside snapshots by design); the
   idempotency cache is bounded (`DEDUP_LIMIT`, deterministic FIFO eviction).
 - Snapshots transfer in a single RPC (no chunking).
