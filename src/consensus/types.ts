@@ -30,7 +30,14 @@ export type Command =
     | { type: 'UPDATE'; id: string; fields: Partial<Omit<Book, 'id'>> }
     | { type: 'DELETE'; id: string }
     | { type: 'BORROW'; id: string; borrowedBy: string; borrowedDate: string; dueDate: string }
-    | { type: 'RETURN'; id: string };
+    | { type: 'RETURN'; id: string }
+    /**
+     * Cluster membership change (Raft dissertation §4). Consumed by the Raft
+     * node (which adopts `members` as its configuration the moment the entry is
+     * appended), and a no-op for the book state machine. `members` is the full
+     * new voting set, including the leader and any node being added/removed.
+     */
+    | { type: 'CONFIG'; members: PeerInfo[] };
 
 /** A single entry in the replicated log. */
 export interface LogEntry {
@@ -107,6 +114,8 @@ export interface InstallSnapshotArgs {
     leaderId: string;
     lastIncludedIndex: number;
     lastIncludedTerm: number;
+    /** Cluster configuration as of the snapshot point (membership survives compaction). */
+    members: PeerInfo[];
     /** Serialized state-machine snapshot (opaque to the transport). */
     data: unknown;
 }
@@ -119,6 +128,8 @@ export interface InstallSnapshotReply {
 export interface Snapshot {
     lastIncludedIndex: number;
     lastIncludedTerm: number;
+    /** Cluster configuration as of the snapshot point (the compacted log's base config). */
+    members?: PeerInfo[];
     data: unknown;
 }
 

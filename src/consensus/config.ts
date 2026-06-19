@@ -28,6 +28,8 @@ export function loadRaftConfig(env: NodeJS.ProcessEnv = process.env): RaftConfig
     return {
         id,
         peers,
+        // Address other nodes use to reach this one (advertised in membership configs).
+        selfUrl: env.ADVERTISE_URL || `http://localhost:${getPort(env)}`,
         electionMinMs: env.ELECTION_MIN_MS ? Number(env.ELECTION_MIN_MS) : undefined,
         electionMaxMs: env.ELECTION_MAX_MS ? Number(env.ELECTION_MAX_MS) : undefined,
         heartbeatMs: env.HEARTBEAT_MS ? Number(env.HEARTBEAT_MS) : undefined,

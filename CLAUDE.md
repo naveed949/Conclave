@@ -31,9 +31,12 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
 ## Architecture map
 
 - `src/consensus/` — the Raft algorithm (the core):
-  - `raftNode.ts` — elections, replication, commit, snapshotting. **Log is
-    snapshot-relative**: `log[0]` is a sentinel at `lastIncludedIndex`; use the
-    `pos()/termAt()/entryAt()/lastLogIndex()` helpers, never raw `log[i]`.
+  - `raftNode.ts` — elections, replication, commit, snapshotting, dynamic
+    membership. **Log is snapshot-relative**: `log[0]` is a sentinel at
+    `lastIncludedIndex`; use the `pos()/termAt()/entryAt()/lastLogIndex()`
+    helpers, never raw `log[i]`. **Configuration is derived from the log** (the
+    latest `CONFIG` entry over `baseConfig`); change quorum/peer logic via
+    `members`/`quorum()`/`otherMembers()`, never a fixed peer list.
   - `stateMachine.ts` / `replicatedStateMachine.ts` — deterministic book store;
     the latter adds the audit hash-chain + idempotency on the apply path.
   - `transport.ts` — `HttpTransport` (prod) / `LocalTransport` (tests).
@@ -42,7 +45,8 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
   `requestContext` (tracing), `forward` (leader forwarding).
 - `src/controllers`, `src/routes`, `src/app.ts` — thin HTTP adapter over the node.
 - `src/server.ts` — wires a node from env and starts it.
-- `tests/` — `consensus`, `bookApi`, `platform`, `snapshot` (+ `helpers.ts`).
+- `tests/` — `consensus`, `bookApi`, `platform`, `snapshot`, `readBarrier`,
+  `membership` (+ `helpers.ts`).
 
 ## Invariants — do not break these
 
@@ -57,6 +61,10 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
   eventually consistent by default. `?consistency=strong` reads go through the
   leader's ReadIndex barrier (`node.readBarrier()`) and must never be served from
   a node that can't confirm leadership — fail closed (`NotLeaderError`) instead.
+- **Membership: one change at a time (ADR-0015).** A `CONFIG` entry takes effect
+  on *append*, not commit; never apply two overlapping changes (the code refuses
+  a second while one is uncommitted). Membership must be derived from the log so
+  every replica agrees — don't track it out of band.
 
 ## Conventions
 
