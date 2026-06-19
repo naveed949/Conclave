@@ -196,4 +196,14 @@ describe('Observability & audit HTTP endpoints', () => {
         const list = await request(app).get('/books');
         expect(list.body.filter((b: { isbn: string }) => b.isbn === 'idem-1')).toHaveLength(1);
     });
+
+    it('serves a linearizable read via ?consistency=strong on the leader', async () => {
+        await request(app).post('/books')
+            .send({ title: 'Strong', author: 'A', publisher: 'P', isbn: 'strong-1', copies: 1 });
+        const res = await request(app).get('/books?consistency=strong');
+        expect(res.status).toBe(200);
+        // A single-node cluster is its own majority, so the barrier resolves and
+        // the just-committed write is guaranteed visible.
+        expect(res.body.some((b: { isbn: string }) => b.isbn === 'strong-1')).toBe(true);
+    });
 });

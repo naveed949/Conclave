@@ -26,6 +26,7 @@ supersedes the old one rather than editing history.
 | [0011](./0011-log-compaction-snapshotting.md) | Log compaction via snapshotting and InstallSnapshot | Accepted |
 | [0012](./0012-platform-layer.md) | A reusable platform layer for cross-cutting concerns | Accepted |
 | [0013](./0013-minimal-dependencies.md) | Minimal external dependencies (implement primitives in-house) | Accepted |
+| [0014](./0014-opt-in-linearizable-reads.md) | Opt-in linearizable reads via ReadIndex | Accepted |
 
 ## Template
 

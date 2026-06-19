@@ -53,8 +53,8 @@ applies an identical command and stays consistent.
 
 | Method | Route | Notes |
 |--------|-------|-------|
-| `GET` | `/books` | List all books (served from local replica) |
-| `GET` | `/books/:id` | Get one book |
+| `GET` | `/books` | List all books (local replica; `?consistency=strong` for a linearizable read) |
+| `GET` | `/books/:id` | Get one book (`?consistency=strong` for a linearizable read) |
 | `POST` | `/books` | Add a book (write — forwarded to leader) |
 | `PUT` | `/books/:id` | Update provided fields (write) |
 | `DELETE` | `/books/:id` | Delete a book (write) |
@@ -71,6 +71,13 @@ A **write** can be sent to any node: a follower transparently **forwards** it to
 the leader. If no leader is currently known it returns `421` with
 `{ "leader": "<id>" }` so the client can retry.
 
+**Reads** are served from the local replica by default (fast, available on any
+node, eventually consistent). Add `?consistency=strong` (or header
+`X-Consistency: strong`) for a **linearizable** read: it goes through the leader's
+ReadIndex barrier (leadership confirmed via a heartbeat quorum) so the response
+reflects every write committed before the read — at the cost of one round-trip,
+and it fails with `421` if the leader can't confirm a quorum. See ADR-0014.
+
 ## Built-in platform concerns
 
 These cross-cutting backend concerns live in `src/platform/` and are wired into
@@ -83,7 +90,8 @@ the consensus core, so any app built on it inherits them for free.
 - **Metrics** (`metrics.ts`) — `/metrics` in Prometheus format, exposing both
   HTTP signals (`http_requests_total`, `http_request_duration_ms`) and
   consensus signals you don't normally get: `raft_is_leader`, `raft_term`,
-  `raft_commit_index`, elections count, and **`raft_replication_lag`** per follower.
+  `raft_commit_index`, elections count, **`raft_replication_lag`** per follower,
+  and `raft_read_barriers_total` (linearizable reads served).
 - **Tracing** (`requestContext.ts`) — an inbound/generated `X-Request-Id` is
   propagated through HTTP → log → committed command via `AsyncLocalStorage`, so a
   single write is correlatable across every node.
@@ -159,17 +167,22 @@ yarn test
 - `tests/consensus.test.ts` — 3-node in-process cluster: single-leader election,
   write replication to every node, log convergence, and **leader failover**.
 - `tests/bookApi.test.ts` — the REST API against a single-node cluster.
-- `tests/platform.test.ts` — audit hash-chain + tamper detection, idempotency,
-  persistence across restart, and the `/audit` `/metrics` `/ready` endpoints.
+- `tests/platform.test.ts` — audit hash-chain + tamper detection, idempotency
+  (incl. bounded dedup cache), persistence across restart, a linearizable read,
+  and the `/audit` `/metrics` `/ready` endpoints.
 - `tests/snapshot.test.ts` — log compaction, InstallSnapshot catch-up of a
   lagging follower, and snapshot restore on restart.
+- `tests/readBarrier.test.ts` — the ReadIndex linearizable-read barrier: serves on
+  a healthy leader, refuses when a quorum can't be confirmed, rejects on a follower.
 
 Tests use `LocalTransport`, so they need no sockets and no database.
 
 ## Limitations (it's a POC)
 
 - No dynamic cluster membership changes (fixed peer list).
-- Reads are served from the local replica (eventually consistent), not linearizable.
+- Reads default to the local replica (eventually consistent); linearizable reads
+  are available opt-in via `?consistency=strong` (leader-routed, no follower
+  read offloading or leases).
 - The audit log grows unbounded (kept in full inside snapshots by design). The
   idempotency cache is bounded (`DEDUP_LIMIT`, FIFO), so a retry older than the
   window re-applies rather than being deduped.
