@@ -109,8 +109,12 @@ the consensus core, so any app built on it inherits them for free.
   behind the leader's snapshot is caught up with an **InstallSnapshot** RPC.
 - **Idempotency** — every write carries a `requestId`; a replayed id returns the
   original result without re-applying, turning at-least-once client retries into
-  exactly-once effects. The dedup cache is **bounded** (`DEDUP_LIMIT`, default
-  10,000) with deterministic FIFO eviction, so it never grows without limit.
+  exactly-once effects. The receiving node assigns the id (honouring an inbound
+  `X-Request-Id`) and echoes it on the response *before* forwarding, so a client
+  that **reuses the returned `X-Request-Id` on retry** gets exactly-once semantics
+  even if a forward times out and returns `421`. The dedup cache is **bounded**
+  (`DEDUP_LIMIT`, default 10,000) with deterministic FIFO eviction, so it never
+  grows without limit.
 - **Dynamic membership** — add or remove nodes at runtime (one at a time, Raft
   §4.1) via `POST`/`DELETE /raft/members`, with no cluster restart. The new
   configuration replicates as a log entry; a joining node catches up by normal
@@ -197,6 +201,9 @@ yarn test
 - `tests/membership.test.ts` — dynamic membership: add a node and watch it catch
   up and join the quorum, remove a follower, a self-removing leader steps down,
   and invalid changes are rejected.
+- `tests/crashConsistency.test.ts` — recovery when a crash lands the snapshot but
+  not the compacted log, InstallSnapshot no-rollback, and durable-boundary
+  snapshot transfer.
 
 Tests use `LocalTransport`, so they need no sockets and no database.
 

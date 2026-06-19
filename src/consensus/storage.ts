@@ -7,6 +7,15 @@ export interface PersistentState {
     currentTerm: number;
     votedFor: string | null;
     log: LogEntry[];
+    /**
+     * Absolute index/term of the log's sentinel (`log[0]`). Persisted so that on
+     * restart the log can be reconciled against a possibly-newer snapshot file:
+     * if a crash landed the snapshot but not the compacted log (or vice-versa),
+     * these let `start()` detect and repair the mismatch instead of silently
+     * corrupting the snapshot-relative index math. Optional for back-compat.
+     */
+    baseIndex?: number;
+    baseTerm?: number;
 }
 
 export interface RaftStorage {

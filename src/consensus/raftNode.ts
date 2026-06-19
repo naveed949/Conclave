@@ -1,5 +1,5 @@
 import { ReplicatedStateMachine, RsmSnapshot } from './replicatedStateMachine';
-import { MemoryStorage, RaftStorage } from './storage';
+import { MemoryStorage, RaftStorage, PersistentState } from './storage';
 import { RpcHandler, Transport } from './transport';
 import { Logger } from '../platform/logger';
 import { MetricsRegistry } from '../platform/metrics';
@@ -229,7 +229,7 @@ export class RaftNode implements RpcHandler {
         if (persisted) {
             this.currentTerm = persisted.currentTerm;
             this.votedFor = persisted.votedFor;
-            this.log = persisted.log;
+            this.reconcileLog(persisted);
             this.logger?.info('restored persistent state', {
                 term: this.currentTerm,
                 logEntries: this.log.length - 1,
@@ -241,9 +241,47 @@ export class RaftNode implements RpcHandler {
         this.becomeFollower(this.currentTerm);
     }
 
-    /** Persist the durable subset of state (term, vote, log). */
+    /**
+     * Reconcile the persisted log with the (separately-persisted) snapshot. The
+     * two files are written non-atomically, so a crash can leave them out of step.
+     * We always write the snapshot before the compacted log, so the persisted log
+     * base can only lag the snapshot, never lead it; repair that case here instead
+     * of trusting the log's base blindly (which would corrupt the index math).
+     */
+    private reconcileLog(persisted: PersistentState): void {
+        const persistedBase = persisted.baseIndex ?? 0;
+        const persistedBaseTerm = persisted.baseTerm ?? 0;
+
+        if (persistedBase >= this.lastIncludedIndex) {
+            // Log is aligned with, or newer than, the snapshot — trust it as-is.
+            this.log = persisted.log;
+            this.lastIncludedIndex = persistedBase;
+            this.lastIncludedTerm = persistedBaseTerm;
+            return;
+        }
+
+        // Snapshot is newer than the persisted log base (crash after the snapshot
+        // landed but before the log was compacted). Drop entries the snapshot now
+        // covers, keeping only the tail strictly after `lastIncludedIndex`.
+        const tailStart = this.lastIncludedIndex - persistedBase + 1;
+        const tail = persisted.log.slice(tailStart);
+        this.log = [{ term: this.lastIncludedTerm, command: { type: 'NOOP' } }, ...tail];
+        this.logger?.warn('reconciled stale log against newer snapshot', {
+            persistedBase,
+            snapshotIndex: this.lastIncludedIndex,
+            keptTail: tail.length,
+        });
+    }
+
+    /** Persist the durable subset of state (term, vote, log + its snapshot base). */
     private persist(): void {
-        this.storage.save({ currentTerm: this.currentTerm, votedFor: this.votedFor, log: this.log });
+        this.storage.save({
+            currentTerm: this.currentTerm,
+            votedFor: this.votedFor,
+            log: this.log,
+            baseIndex: this.lastIncludedIndex,
+            baseTerm: this.lastIncludedTerm,
+        });
     }
 
     stop(): void {
@@ -463,6 +501,12 @@ export class RaftNode implements RpcHandler {
     }
 
     private becomeCandidate(): void {
+        // A node removed from the configuration must not campaign: it can never win
+        // a real quorum and would only disrupt the remaining cluster (zombie leader).
+        if (!this.members.has(this.id)) {
+            this.logger?.debug('not campaigning: not a cluster member');
+            return;
+        }
         this.currentTerm += 1;
         this.role = 'candidate';
         this.votedFor = this.id;
@@ -603,7 +647,11 @@ export class RaftNode implements RpcHandler {
         }
 
         if (reply.success) {
-            const match = reply.matchIndex ?? prevLogIndex + args.entries.length;
+            // Never trust a follower-reported matchIndex beyond what we actually sent,
+            // so a buggy/malicious follower can't inflate matchIndex and prematurely
+            // advance the commit index.
+            const expected = prevLogIndex + args.entries.length;
+            const match = Math.min(reply.matchIndex ?? expected, expected);
             this.matchIndex.set(peer.id, match);
             this.nextIndex.set(peer.id, match + 1);
             this.advanceCommitIndex();
@@ -618,14 +666,21 @@ export class RaftNode implements RpcHandler {
     /** Returns true if the peer acknowledged our leadership for the current term. */
     private async sendSnapshot(peer: PeerInfo): Promise<boolean> {
         const term = this.currentTerm;
-        const snapIndex = this.lastApplied;
+        // Ship the DURABLE snapshot (its persisted lastIncludedIndex/Term/data), not
+        // a live snapshot taken at lastApplied. A live snapshot reflects state through
+        // lastApplied but would be labelled with a boundary whose term may already be
+        // compacted away — the term wouldn't match the entry, corrupting the follower's
+        // later AppendEntries consistency checks. This path is only reached once a
+        // snapshot exists (nextIndex <= lastIncludedIndex >= 1).
+        const durable = this.storage.loadSnapshot();
+        const snapIndex = durable?.lastIncludedIndex ?? this.lastIncludedIndex;
         const args: InstallSnapshotArgs = {
             term,
             leaderId: this.id,
             lastIncludedIndex: snapIndex,
-            lastIncludedTerm: this.termAt(snapIndex) ?? this.lastIncludedTerm,
-            members: this.configAt(snapIndex),
-            data: this.stateMachine.snapshot(),
+            lastIncludedTerm: durable?.lastIncludedTerm ?? this.lastIncludedTerm,
+            members: durable?.members ?? this.configAt(snapIndex),
+            data: durable?.data ?? this.stateMachine.snapshot(),
         };
         this.logger?.info('sending snapshot', { peer: peer.id, lastIncludedIndex: snapIndex });
 
@@ -703,29 +758,42 @@ export class RaftNode implements RpcHandler {
         this.lastLeaderContact = Date.now();
         this.resetElectionTimer();
 
-        // Ignore a stale snapshot we've already surpassed.
-        if (args.lastIncludedIndex <= this.lastIncludedIndex) {
+        // Ignore a snapshot we've already covered (don't roll back our own state).
+        if (args.lastIncludedIndex <= this.lastIncludedIndex || args.lastIncludedIndex <= this.commitIndex) {
             return { term: this.currentTerm };
         }
 
         this.stateMachine.restore(args.data as RsmSnapshot);
+
+        // Raft figure 13, step 6: if we already have the entry at the snapshot's
+        // last-included index with a matching term, the snapshot is just a prefix
+        // of our log — keep the tail after it. Otherwise our log conflicts or falls
+        // short, so discard it entirely and let the leader re-replicate.
+        const existingTerm = this.termAt(args.lastIncludedIndex);
+        const tail =
+            existingTerm === args.lastIncludedTerm
+                ? this.log.slice(this.pos(args.lastIncludedIndex) + 1)
+                : [];
+        this.log = [{ term: args.lastIncludedTerm, command: { type: 'NOOP' } }, ...tail];
+
         this.lastIncludedIndex = args.lastIncludedIndex;
         this.lastIncludedTerm = args.lastIncludedTerm;
-        this.commitIndex = args.lastIncludedIndex;
-        this.lastApplied = args.lastIncludedIndex;
-        // Discard the entire log; the leader will re-replicate anything newer.
-        this.log = [{ term: args.lastIncludedTerm, command: { type: 'NOOP' } }];
+        // commitIndex/lastApplied only move forward (guarded above against rollback).
+        this.commitIndex = Math.max(this.commitIndex, args.lastIncludedIndex);
+        this.lastApplied = Math.max(this.lastApplied, args.lastIncludedIndex);
         // Adopt the configuration carried with the snapshot as the new base config.
         if (args.members) this.baseConfig = args.members;
         this.recomputeMembers();
-        this.persist();
+
+        // Persist snapshot before the compacted log (same crash-ordering as takeSnapshot).
         this.storage.saveSnapshot({
             lastIncludedIndex: this.lastIncludedIndex,
             lastIncludedTerm: this.lastIncludedTerm,
             members: args.members,
             data: args.data,
         });
-        this.logger?.info('installed snapshot', { lastIncludedIndex: this.lastIncludedIndex });
+        this.persist();
+        this.logger?.info('installed snapshot', { lastIncludedIndex: this.lastIncludedIndex, keptTail: tail.length });
         return { term: this.currentTerm };
     }
 
@@ -789,13 +857,18 @@ export class RaftNode implements RpcHandler {
 
         // Keep the sentinel + everything after the snapshot point.
         const tail = this.log.slice(this.pos(snapIndex) + 1);
+
+        // Order matters for crash safety: persist the snapshot FIRST, then the
+        // compacted log. That way the durable log base can only ever lag the
+        // snapshot (reconciled on restart), never lead it (which would lose the
+        // state the discarded entries produced).
+        this.storage.saveSnapshot({ lastIncludedIndex: snapIndex, lastIncludedTerm: snapTerm, members, data });
+
         this.log = [{ term: snapTerm, command: { type: 'NOOP' } }, ...tail];
         this.lastIncludedIndex = snapIndex;
         this.lastIncludedTerm = snapTerm;
         this.baseConfig = members;
-
         this.persist();
-        this.storage.saveSnapshot({ lastIncludedIndex: snapIndex, lastIncludedTerm: snapTerm, members, data });
         this.logger?.info('took snapshot', { lastIncludedIndex: snapIndex, remainingEntries: this.log.length - 1 });
     }
 
