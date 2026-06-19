@@ -65,7 +65,10 @@ applies an identical command and stays consistent.
 | `GET` | `/metrics` | Prometheus metrics (raft + HTTP) |
 | `GET` | `/health` | Liveness + node status |
 | `GET` | `/ready` | Readiness (200 once a leader is known, else 503) |
-| `GET` | `/raft/status` | Node role, term, leader, log/commit indices |
+| `GET` | `/raft/status` | Node role, term, leader, log/commit indices, members |
+| `GET` | `/raft/members` | Current cluster configuration (voting members) |
+| `POST` | `/raft/members` | Add a voting node `{ id, url }` (leader-routed) |
+| `DELETE` | `/raft/members/:id` | Remove a voting node (leader-routed) |
 
 A **write** can be sent to any node: a follower transparently **forwards** it to
 the leader. If no leader is currently known it returns `421` with
@@ -91,7 +94,7 @@ the consensus core, so any app built on it inherits them for free.
   HTTP signals (`http_requests_total`, `http_request_duration_ms`) and
   consensus signals you don't normally get: `raft_is_leader`, `raft_term`,
   `raft_commit_index`, elections count, **`raft_replication_lag`** per follower,
-  and `raft_read_barriers_total` (linearizable reads served).
+  `raft_cluster_size`, and `raft_read_barriers_total` (linearizable reads served).
 - **Tracing** (`requestContext.ts`) — an inbound/generated `X-Request-Id` is
   propagated through HTTP → log → committed command via `AsyncLocalStorage`, so a
   single write is correlatable across every node.
@@ -108,6 +111,11 @@ the consensus core, so any app built on it inherits them for free.
   original result without re-applying, turning at-least-once client retries into
   exactly-once effects. The dedup cache is **bounded** (`DEDUP_LIMIT`, default
   10,000) with deterministic FIFO eviction, so it never grows without limit.
+- **Dynamic membership** — add or remove nodes at runtime (one at a time, Raft
+  §4.1) via `POST`/`DELETE /raft/members`, with no cluster restart. The new
+  configuration replicates as a log entry; a joining node catches up by normal
+  replication or an InstallSnapshot, and a leader removed from the cluster steps
+  down. A removed/partitioned node can't disrupt the cluster (leader stickiness).
 - **Leader forwarding** + `/ready` for load-balancer health checks.
 
 **Audit** — the replicated log *is* the audit trail. Each committed change is
@@ -144,13 +152,25 @@ curl -s localhost:<other-node>/books          # the book is already replicated h
 Kill the leader process and watch a follower get elected (`/raft/status`) while the
 data survives.
 
+Add or remove a node at runtime (sent to any node; forwarded to the leader):
+
+```bash
+# start node4 first (PORT=3004, PEERS pointing at the existing nodes), then:
+curl -s -X POST localhost:<leader>/raft/members \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"node4","url":"http://localhost:3004"}'
+curl -s localhost:3001/raft/members           # node4 is now a voting member
+curl -s -X DELETE localhost:<leader>/raft/members/node4
+```
+
 ### Environment variables
 
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `NODE_ID` | `node1` | Unique id for this node |
 | `PORT` | `3000` | HTTP port |
-| `PEERS` | `""` | Other nodes as `id@url` CSV |
+| `PEERS` | `""` | Initial other nodes as `id@url` CSV (membership is dynamic after start) |
+| `ADVERTISE_URL` | `http://localhost:$PORT` | Address peers use to reach this node (in membership configs) |
 | `ELECTION_MIN_MS` / `ELECTION_MAX_MS` | `150` / `300` | Election timeout window |
 | `HEARTBEAT_MS` | `50` | Leader heartbeat interval |
 | `SNAPSHOT_THRESHOLD` | `1000` | Compact the log after this many in-memory entries |
@@ -174,12 +194,17 @@ yarn test
   lagging follower, and snapshot restore on restart.
 - `tests/readBarrier.test.ts` — the ReadIndex linearizable-read barrier: serves on
   a healthy leader, refuses when a quorum can't be confirmed, rejects on a follower.
+- `tests/membership.test.ts` — dynamic membership: add a node and watch it catch
+  up and join the quorum, remove a follower, a self-removing leader steps down,
+  and invalid changes are rejected.
 
 Tests use `LocalTransport`, so they need no sockets and no database.
 
 ## Limitations (it's a POC)
 
-- No dynamic cluster membership changes (fixed peer list).
+- Membership changes are one node at a time (Raft §4.1, no joint consensus) and a
+  joining node has no separate non-voting catch-up phase, so adding a far-behind
+  node while another is down can briefly stall commits.
 - Reads default to the local replica (eventually consistent); linearizable reads
   are available opt-in via `?consistency=strong` (leader-routed, no follower
   read offloading or leases).

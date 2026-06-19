@@ -21,6 +21,8 @@ import {
 export interface RaftConfig {
     id: string;
     peers: PeerInfo[];
+    /** This node's own address, advertised to peers in membership configs. */
+    selfUrl?: string;
     electionMinMs?: number;
     electionMaxMs?: number;
     heartbeatMs?: number;
@@ -39,6 +41,14 @@ export class NotLeaderError extends Error {
     constructor(public readonly leaderId: string | null) {
         super('NOT_LEADER');
         this.name = 'NotLeaderError';
+    }
+}
+
+/** Raised when a membership change is invalid or cannot be started right now. */
+export class MembershipError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'MembershipError';
     }
 }
 
@@ -66,7 +76,7 @@ interface ReadWaiter {
  */
 export class RaftNode implements RpcHandler {
     readonly id: string;
-    private readonly peers: PeerInfo[];
+    private readonly selfPeer: PeerInfo;
     private readonly transport: Transport;
     private readonly storage: RaftStorage;
     private readonly logger?: Logger;
@@ -80,6 +90,16 @@ export class RaftNode implements RpcHandler {
     private log: LogEntry[] = [{ term: 0, command: { type: 'NOOP' } }];
     private lastIncludedIndex = 0;
     private lastIncludedTerm = 0;
+
+    // Cluster membership (Raft dissertation §4). The configuration lives in the
+    // log and takes effect the moment an entry is appended (not when committed).
+    // `members` is the current voting set (including self), derived from the log;
+    // `baseConfig` is the configuration as of the snapshot boundary, the base the
+    // log's CONFIG entries are layered on top of.
+    private members = new Map<string, PeerInfo>();
+    private baseConfig: PeerInfo[];
+    /** Wall-clock of the last AppendEntries/InstallSnapshot from a current leader. */
+    private lastLeaderContact = 0;
 
     // Volatile state.
     private commitIndex = 0;
@@ -109,7 +129,7 @@ export class RaftNode implements RpcHandler {
 
     constructor(config: RaftConfig, transport: Transport) {
         this.id = config.id;
-        this.peers = config.peers;
+        this.selfPeer = { id: config.id, url: config.selfUrl ?? `local://${config.id}` };
         this.transport = transport;
         this.storage = config.storage ?? new MemoryStorage();
         this.logger = config.logger?.child({ component: 'raft', node: config.id });
@@ -119,6 +139,48 @@ export class RaftNode implements RpcHandler {
         this.heartbeatMs = config.heartbeatMs ?? 50;
         this.snapshotThreshold = config.snapshotThreshold ?? 1000;
         this.stateMachine = new ReplicatedStateMachine(config.dedupLimit);
+        // Bootstrap configuration: the peers from env plus this node itself.
+        this.baseConfig = [this.selfPeer, ...config.peers];
+        this.recomputeMembers();
+    }
+
+    // ---- cluster membership ----
+
+    /** Other voting members (the current configuration minus this node). */
+    private otherMembers(): PeerInfo[] {
+        return [...this.members.values()].filter((p) => p.id !== this.id);
+    }
+
+    /** Votes/acks needed for a decision: a strict majority of the current config. */
+    private quorum(): number {
+        return Math.floor(this.members.size / 2) + 1;
+    }
+
+    /** Configuration effective at `absIndex`: baseConfig + CONFIG entries up to it. */
+    private configAt(absIndex: number): PeerInfo[] {
+        let cfg = this.baseConfig;
+        const upto = this.pos(Math.min(absIndex, this.lastLogIndex()));
+        for (let p = 1; p <= upto; p++) {
+            const cmd = this.log[p]?.command;
+            if (cmd?.type === 'CONFIG') cfg = cmd.members;
+        }
+        return cfg;
+    }
+
+    /** Recompute `members` from the latest configuration in the log. */
+    private recomputeMembers(): void {
+        const cfg = this.configAt(this.lastLogIndex());
+        const next = new Map<string, PeerInfo>();
+        for (const p of cfg) next.set(p.id, p);
+        this.members = next;
+    }
+
+    /** True if the log holds a not-yet-committed CONFIG entry (a change in flight). */
+    private hasUncommittedConfig(): boolean {
+        for (let i = this.commitIndex + 1; i <= this.lastLogIndex(); i++) {
+            if (this.entryAt(i)?.command.type === 'CONFIG') return true;
+        }
+        return false;
     }
 
     // ---- log index helpers (translate absolute index <-> array position) ----
@@ -158,6 +220,8 @@ export class RaftNode implements RpcHandler {
             this.commitIndex = snap.lastIncludedIndex;
             this.lastApplied = snap.lastIncludedIndex;
             this.log = [{ term: snap.lastIncludedTerm, command: { type: 'NOOP' } }];
+            // The config compacted into the snapshot becomes the new base config.
+            if (snap.members) this.baseConfig = snap.members;
             this.logger?.info('restored snapshot', { lastIncludedIndex: this.lastIncludedIndex });
         }
 
@@ -172,6 +236,8 @@ export class RaftNode implements RpcHandler {
                 lastIncludedIndex: this.lastIncludedIndex,
             });
         }
+        // Adopt whatever configuration the restored log/snapshot implies.
+        this.recomputeMembers();
         this.becomeFollower(this.currentTerm);
     }
 
@@ -208,7 +274,13 @@ export class RaftNode implements RpcHandler {
             lastApplied: this.lastApplied,
             books: this.stateMachine.size(),
             dedupCacheSize: this.stateMachine.dedupCacheSize(),
+            members: [...this.members.keys()],
         };
+    }
+
+    /** The current cluster configuration (voting members, including self). */
+    getMembers(): PeerInfo[] {
+        return [...this.members.values()];
     }
 
     getLeaderId(): string | null {
@@ -218,7 +290,7 @@ export class RaftNode implements RpcHandler {
     /** URL of the current leader (for write forwarding), or null if unknown/self. */
     getLeaderUrl(): string | null {
         if (!this.leaderId || this.leaderId === this.id) return null;
-        return this.peers.find((p) => p.id === this.leaderId)?.url ?? null;
+        return this.members.get(this.leaderId)?.url ?? null;
     }
 
     /**
@@ -242,6 +314,61 @@ export class RaftNode implements RpcHandler {
         // A single-node cluster is its own majority, so try to commit right away.
         this.advanceCommitIndex();
         // Push to followers immediately rather than waiting for the next heartbeat.
+        this.broadcastAppendEntries();
+        return promise;
+    }
+
+    /**
+     * Add or remove a single voting member (Raft dissertation §4.1). Changing one
+     * server at a time keeps the old and new majorities overlapping, so no split
+     * decision is possible without a joint-consensus phase. The new configuration
+     * is appended as a CONFIG entry and adopted immediately; the returned promise
+     * resolves once that entry commits. Leader-only.
+     */
+    changeMembership(change: { add?: PeerInfo; remove?: string }, meta?: CommandMeta): Promise<ApplyResult> {
+        if (this.role !== 'leader') throw new NotLeaderError(this.leaderId);
+        // One change at a time: refuse while a previous change is still uncommitted.
+        if (this.hasUncommittedConfig()) {
+            return Promise.reject(new MembershipError('A membership change is already in progress'));
+        }
+
+        const next = new Map(this.members);
+        if (change.add) {
+            if (next.has(change.add.id)) {
+                return Promise.reject(new MembershipError(`${change.add.id} is already a member`));
+            }
+            next.set(change.add.id, change.add);
+        } else if (change.remove) {
+            if (!next.has(change.remove)) {
+                return Promise.reject(new MembershipError(`${change.remove} is not a member`));
+            }
+            if (next.size === 1) {
+                return Promise.reject(new MembershipError('Cannot remove the last member'));
+            }
+            next.delete(change.remove);
+        } else {
+            return Promise.reject(new MembershipError('Specify add or remove'));
+        }
+
+        return this.submitConfig([...next.values()], meta);
+    }
+
+    /** Append a CONFIG entry, adopt it immediately, and replicate it. */
+    private submitConfig(members: PeerInfo[], meta?: CommandMeta): Promise<ApplyResult> {
+        const entry: LogEntry = { term: this.currentTerm, command: { type: 'CONFIG', members }, meta };
+        this.log.push(entry);
+        // Adopt the new configuration the instant it is in the log (Raft §4.1).
+        this.recomputeMembers();
+        this.persist();
+        const index = this.lastLogIndex();
+        this.matchIndex.set(this.id, index);
+        this.nextIndex.set(this.id, index + 1);
+        this.logger?.info('membership change proposed', { index, members: members.map((m) => m.id) });
+
+        const promise = new Promise<ApplyResult>((resolve, reject) => {
+            this.pending.set(index, { term: entry.term, resolve, reject });
+        });
+        this.advanceCommitIndex();
         this.broadcastAppendEntries();
         return promise;
     }
@@ -276,10 +403,10 @@ export class RaftNode implements RpcHandler {
      * reports a log mismatch — the follower still recognises us as leader.
      */
     private async confirmLeadership(): Promise<boolean> {
-        const majority = Math.floor((this.peers.length + 1) / 2) + 1;
+        const majority = this.quorum();
         if (majority <= 1) return true; // single-node cluster is its own majority
         const term = this.currentTerm;
-        const acks = await Promise.all(this.peers.map((peer) => this.replicateTo(peer)));
+        const acks = await Promise.all(this.otherMembers().map((peer) => this.replicateTo(peer)));
         if (this.role !== 'leader' || this.currentTerm !== term) return false;
         const confirmed = 1 + acks.filter(Boolean).length; // +1 for self
         return confirmed >= majority;
@@ -352,7 +479,9 @@ export class RaftNode implements RpcHandler {
         this.leaderId = this.id;
         this.clearElectionTimer();
         const nextIdx = this.lastLogIndex() + 1;
-        for (const peer of this.peers) {
+        this.nextIndex.clear();
+        this.matchIndex.clear();
+        for (const peer of this.otherMembers()) {
             this.nextIndex.set(peer.id, nextIdx);
             this.matchIndex.set(peer.id, 0);
         }
@@ -376,14 +505,14 @@ export class RaftNode implements RpcHandler {
         };
 
         let votes = 1; // vote for self
-        const majority = Math.floor((this.peers.length + 1) / 2) + 1;
+        const majority = this.quorum();
         if (votes >= majority) {
             this.becomeLeader();
             return;
         }
 
         await Promise.all(
-            this.peers.map(async (peer) => {
+            this.otherMembers().map(async (peer) => {
                 const reply = await this.transport.sendRequestVote(peer, args);
                 if (!reply || this.role !== 'candidate' || this.currentTerm !== term) return;
                 if (reply.term > this.currentTerm) {
@@ -401,6 +530,15 @@ export class RaftNode implements RpcHandler {
     }
 
     handleRequestVote(args: RequestVoteArgs): RequestVoteReply {
+        // Disruption avoidance (Raft dissertation §4.2.3): if we have heard from a
+        // leader within the minimum election timeout, ignore the vote request and
+        // do not adopt its term. This stops a removed or partitioned server — which
+        // keeps timing out and bumping its term — from forcing needless elections.
+        const sinceLeader = Date.now() - this.lastLeaderContact;
+        if (this.leaderId !== null && this.leaderId !== args.candidateId && sinceLeader < this.electionMinMs) {
+            return { term: this.currentTerm, voteGranted: false };
+        }
+
         if (args.term > this.currentTerm) this.becomeFollower(args.term);
 
         const lastLogIndex = this.lastLogIndex();
@@ -432,7 +570,7 @@ export class RaftNode implements RpcHandler {
 
     private broadcastAppendEntries(): void {
         if (this.role !== 'leader') return;
-        for (const peer of this.peers) void this.replicateTo(peer);
+        for (const peer of this.otherMembers()) void this.replicateTo(peer);
     }
 
     /** Returns true if the peer acknowledged our leadership for the current term. */
@@ -486,6 +624,7 @@ export class RaftNode implements RpcHandler {
             leaderId: this.id,
             lastIncludedIndex: snapIndex,
             lastIncludedTerm: this.termAt(snapIndex) ?? this.lastIncludedTerm,
+            members: this.configAt(snapIndex),
             data: this.stateMachine.snapshot(),
         };
         this.logger?.info('sending snapshot', { peer: peer.id, lastIncludedIndex: snapIndex });
@@ -511,6 +650,7 @@ export class RaftNode implements RpcHandler {
         if (args.term > this.currentTerm) this.becomeFollower(args.term);
         this.role = 'follower';
         this.leaderId = args.leaderId;
+        this.lastLeaderContact = Date.now();
         this.resetElectionTimer();
 
         // Everything up to our snapshot is already durably applied.
@@ -539,7 +679,11 @@ export class RaftNode implements RpcHandler {
             }
             p += 1;
         }
-        if (mutated) this.persist();
+        if (mutated) {
+            this.persist();
+            // A CONFIG entry may have arrived/changed; adopt it immediately (Raft §4.1).
+            this.recomputeMembers();
+        }
 
         if (args.leaderCommit > this.commitIndex) {
             this.commitIndex = Math.min(args.leaderCommit, this.lastLogIndex());
@@ -556,6 +700,7 @@ export class RaftNode implements RpcHandler {
         if (args.term > this.currentTerm) this.becomeFollower(args.term);
         this.role = 'follower';
         this.leaderId = args.leaderId;
+        this.lastLeaderContact = Date.now();
         this.resetElectionTimer();
 
         // Ignore a stale snapshot we've already surpassed.
@@ -570,10 +715,14 @@ export class RaftNode implements RpcHandler {
         this.lastApplied = args.lastIncludedIndex;
         // Discard the entire log; the leader will re-replicate anything newer.
         this.log = [{ term: args.lastIncludedTerm, command: { type: 'NOOP' } }];
+        // Adopt the configuration carried with the snapshot as the new base config.
+        if (args.members) this.baseConfig = args.members;
+        this.recomputeMembers();
         this.persist();
         this.storage.saveSnapshot({
             lastIncludedIndex: this.lastIncludedIndex,
             lastIncludedTerm: this.lastIncludedTerm,
+            members: args.members,
             data: args.data,
         });
         this.logger?.info('installed snapshot', { lastIncludedIndex: this.lastIncludedIndex });
@@ -585,11 +734,12 @@ export class RaftNode implements RpcHandler {
         for (let n = this.lastLogIndex(); n > this.commitIndex; n--) {
             // Raft safety: only commit entries from the current term by counting.
             if (this.termAt(n) !== this.currentTerm) continue;
+            // Count only current voting members (a removed node mustn't count).
             let count = 0;
-            for (const idx of this.matchIndex.values()) {
-                if (idx >= n) count += 1;
+            for (const id of this.members.keys()) {
+                if ((this.matchIndex.get(id) ?? 0) >= n) count += 1;
             }
-            if (count >= Math.floor((this.peers.length + 1) / 2) + 1) {
+            if (count >= this.quorum()) {
                 this.commitIndex = n;
                 this.applyCommitted();
                 break;
@@ -612,6 +762,12 @@ export class RaftNode implements RpcHandler {
             }
         }
         this.resolveReadWaiters();
+        // If a committed config removed us, step down: we are no longer a member.
+        if (this.role === 'leader' && !this.members.has(this.id)) {
+            this.logger?.info('stepping down: removed from cluster configuration');
+            this.leaderId = null;
+            this.becomeFollower(this.currentTerm);
+        }
         this.maybeSnapshot();
     }
 
@@ -627,15 +783,19 @@ export class RaftNode implements RpcHandler {
         const snapIndex = this.lastApplied;
         const snapTerm = this.termAt(snapIndex)!;
         const data = this.stateMachine.snapshot();
+        // Capture the configuration at the snapshot point before compacting — the
+        // CONFIG entries that produced it are about to be discarded.
+        const members = this.configAt(snapIndex);
 
         // Keep the sentinel + everything after the snapshot point.
         const tail = this.log.slice(this.pos(snapIndex) + 1);
         this.log = [{ term: snapTerm, command: { type: 'NOOP' } }, ...tail];
         this.lastIncludedIndex = snapIndex;
         this.lastIncludedTerm = snapTerm;
+        this.baseConfig = members;
 
         this.persist();
-        this.storage.saveSnapshot({ lastIncludedIndex: snapIndex, lastIncludedTerm: snapTerm, data });
+        this.storage.saveSnapshot({ lastIncludedIndex: snapIndex, lastIncludedTerm: snapTerm, members, data });
         this.logger?.info('took snapshot', { lastIncludedIndex: snapIndex, remainingEntries: this.log.length - 1 });
     }
 
@@ -679,10 +839,11 @@ export class RaftNode implements RpcHandler {
         m.raftLogLength.set(this.log.length - 1, { node });
         m.raftSnapshotIndex.set(this.lastIncludedIndex, { node });
         m.raftDedupCacheSize.set(this.stateMachine.dedupCacheSize(), { node });
+        m.raftClusterSize.set(this.members.size, { node });
         m.booksTotal.set(this.stateMachine.size(), { node });
         if (this.role === 'leader') {
             const last = this.lastLogIndex();
-            for (const peer of this.peers) {
+            for (const peer of this.otherMembers()) {
                 m.raftReplicationLag.set(last - (this.matchIndex.get(peer.id) ?? 0), { node, peer: peer.id });
             }
         }

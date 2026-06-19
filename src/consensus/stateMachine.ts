@@ -17,6 +17,10 @@ export class BookStateMachine {
             case 'NOOP':
                 return { status: 200 };
 
+            // Membership changes are consumed by the Raft node, not the book store.
+            case 'CONFIG':
+                return { status: 200 };
+
             case 'ADD': {
                 const { book } = command;
                 const duplicate = [...this.books.values()].some((b) => b.isbn === book.isbn);

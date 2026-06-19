@@ -75,6 +75,9 @@ leader just like writes.
   tamper-evident and replicated.
 - **Idempotency** — a replayed `requestId` returns the cached result, so retries
   have exactly-once effect.
+- **Membership change** — a `CONFIG` log entry carrying the new voting set; nodes
+  can be added/removed one at a time at runtime, and a node adopts a new config
+  the moment it appends the entry (Raft §4.1).
 
 ## Where things live
 
@@ -92,15 +95,17 @@ leader just like writes.
 ## Current status
 
 - Implemented: Raft (election + replication), deterministic state machine,
-  persistence, snapshotting/compaction, idempotency, leader forwarding,
-  structured logging, Prometheus metrics, request tracing, hash-chained audit, CI.
+  persistence, snapshotting/compaction, idempotency (bounded), dynamic membership,
+  linearizable reads (opt-in), leader forwarding, structured logging, Prometheus
+  metrics, request tracing, hash-chained audit, CI.
 - All work is on branch `claude/codebase-review-g2rts3` (PR #1). 27 tests pass.
 
 ## Known limitations / likely next steps
 
 (See the "Limitations" section of the README and the relevant ADRs.)
 
-- No dynamic cluster membership changes (fixed peer list).
+- Membership changes are one-at-a-time (no joint consensus) and a joining node has
+  no non-voting catch-up phase.
 - Reads are eventually consistent by default; linearizable reads are opt-in via
   `?consistency=strong` (leader-routed, no follower offloading or leases).
 - Audit log grows unbounded (kept in full inside snapshots by design); the
