@@ -28,6 +28,7 @@ supersedes the old one rather than editing history.
 | [0013](./0013-minimal-dependencies.md) | Minimal external dependencies (implement primitives in-house) | Accepted |
 | [0014](./0014-opt-in-linearizable-reads.md) | Opt-in linearizable reads via ReadIndex | Accepted |
 | [0015](./0015-dynamic-cluster-membership.md) | Dynamic cluster membership via single-server changes | Accepted |
+| [0016](./0016-crash-consistent-snapshot-persistence.md) | Crash-consistent snapshot/log persistence and snapshot transfer | Accepted |
 
 ## Template
 
