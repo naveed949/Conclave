@@ -1,31 +1,38 @@
 import dotenv from 'dotenv';
-import express, { Application } from 'express';
-import mongoose, {ConnectOptions} from 'mongoose';
-import bodyParser from 'body-parser';
-import cors from 'cors';
-import bookRoutes from './routes/bookRoutes';
+import { createApp } from './app';
+import { RaftNode } from './consensus/raftNode';
+import { HttpTransport } from './consensus/transport';
+import { FileStorage } from './consensus/storage';
+import { getPort, loadRaftConfig } from './consensus/config';
+import { createLogger } from './platform/logger';
+import { metrics } from './platform/metrics';
 
 dotenv.config();
 
-// Set up the Express app
-const app: Application = express();
+const logger = createLogger();
+const config = loadRaftConfig();
+const storage = new FileStorage(config.id, process.env.DATA_DIR || './data');
 
-// Set up middleware
-app.use(bodyParser.json());
-app.use(cors());
+const node = new RaftNode({ ...config, logger, metrics, storage }, new HttpTransport());
 
-// Set up routes
-app.use('/books', bookRoutes);
+// Refresh Raft gauges whenever /metrics is scraped.
+metrics.registerCollector(() => node.collectMetrics());
 
-// Set up the MongoDB connection
-const mongoURI = process.env.MONGO_URI || 'mongodb://localhost:27017/library';
+const app = createApp(node, { logger, metrics });
+const PORT = getPort();
 
-mongoose
-    .connect(mongoURI)
-    .then(() => console.log('MongoDB connected...'))
-    .catch((err) => console.log(err));
+const server = app.listen(PORT, () => {
+    logger.info('node started', { node: config.id, port: PORT, peers: config.peers.length });
+    node.start();
+});
 
-// Set up the server
-const PORT = process.env.PORT || 3000;
-// app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+const shutdown = () => {
+    logger.info('shutting down', { node: config.id });
+    node.stop();
+    server.close(() => process.exit(0));
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+export { app, node };
 export default app;
