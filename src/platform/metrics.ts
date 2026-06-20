@@ -40,6 +40,16 @@ class Gauge {
         this.series.set(labelKey(labels), { labels, value });
     }
 
+    /** Drop a single labelled series (e.g. a peer that left the cluster). */
+    remove(labels?: Labels): void {
+        this.series.delete(labelKey(labels));
+    }
+
+    /** Drop all series (re-populated by the collector at scrape time). */
+    reset(): void {
+        this.series.clear();
+    }
+
     expose(): string {
         const lines = [`# HELP ${this.name} ${this.help}`, `# TYPE ${this.name} gauge`];
         for (const [k, s] of this.series) lines.push(`${this.name}${withBraces(k)} ${s.value}`);
