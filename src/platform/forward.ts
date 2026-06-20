@@ -34,7 +34,11 @@ export function forwardToLeader(req: Request, res: Response, leaderUrl: string):
                 let data = '';
                 upstream.on('data', (c) => (data += c));
                 upstream.on('end', () => {
-                    res.status(upstream.statusCode || 502).type('application/json').send(data);
+                    // Relay the upstream content-type verbatim rather than forcing JSON —
+                    // an error body from the leader may be HTML/plain text.
+                    const contentType = upstream.headers['content-type'];
+                    if (contentType) res.type(contentType);
+                    res.status(upstream.statusCode || 502).send(data);
                     resolve(true);
                 });
             },

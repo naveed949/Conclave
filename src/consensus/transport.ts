@@ -49,6 +49,12 @@ function postJson<T>(url: string, body: unknown, timeoutMs: number): Promise<T> 
                 let data = '';
                 res.on('data', (chunk) => (data += chunk));
                 res.on('end', () => {
+                    // A non-2xx or empty/non-JSON body (e.g. a peer crashing mid-request)
+                    // is treated as "no reply" by callers, which map a rejection to null.
+                    if (!res.statusCode || res.statusCode >= 300 || data.length === 0) {
+                        reject(new Error(`bad response: status=${res.statusCode} len=${data.length}`));
+                        return;
+                    }
                     try {
                         resolve(JSON.parse(data) as T);
                     } catch (err) {
