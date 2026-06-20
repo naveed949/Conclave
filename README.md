@@ -204,6 +204,8 @@ yarn test
 - `tests/crashConsistency.test.ts` — recovery when a crash lands the snapshot but
   not the compacted log, InstallSnapshot no-rollback, and durable-boundary
   snapshot transfer.
+- `tests/logBacktracking.test.ts` — accelerated conflict-hint backtracking and
+  reconciliation of a divergent follower log.
 
 Tests use `LocalTransport`, so they need no sockets and no database.
 
