@@ -205,6 +205,21 @@ export class RaftNode implements RpcHandler {
         return this.log[p];
     }
 
+    /** Earliest index in our log that shares `term` with `absIndex` (for backtracking). */
+    private firstIndexOfTerm(absIndex: number, term: number): number {
+        let i = absIndex;
+        while (i > this.lastIncludedIndex + 1 && this.termAt(i - 1) === term) i -= 1;
+        return i;
+    }
+
+    /** Last index in our log whose term is `term`, or undefined if none. */
+    private lastIndexOfTerm(term: number): number | undefined {
+        for (let i = this.lastLogIndex(); i > this.lastIncludedIndex; i--) {
+            if (this.termAt(i) === term) return i;
+        }
+        return this.lastIncludedTerm === term ? this.lastIncludedIndex : undefined;
+    }
+
     // ---- lifecycle ----
 
     start(): void {
@@ -656,8 +671,19 @@ export class RaftNode implements RpcHandler {
             this.nextIndex.set(peer.id, match + 1);
             this.advanceCommitIndex();
         } else {
-            // Log inconsistency: back off and retry (may fall through to a snapshot).
-            this.nextIndex.set(peer.id, Math.max(1, nextIdx - 1));
+            // Log inconsistency: use the follower's conflict hint to skip a whole
+            // term per round trip (accelerated backtracking), falling back to a
+            // single-step decrement. May ultimately fall through to a snapshot.
+            let next: number;
+            if (reply.conflictTerm !== undefined) {
+                const lastWithTerm = this.lastIndexOfTerm(reply.conflictTerm);
+                next = lastWithTerm !== undefined ? lastWithTerm + 1 : reply.conflictIndex ?? nextIdx - 1;
+            } else if (reply.conflictIndex !== undefined) {
+                next = reply.conflictIndex;
+            } else {
+                next = nextIdx - 1;
+            }
+            this.nextIndex.set(peer.id, Math.max(1, Math.min(next, this.lastLogIndex() + 1)));
         }
         // Either way the follower recognised us as leader for this term.
         return true;
@@ -713,10 +739,21 @@ export class RaftNode implements RpcHandler {
             return { term: this.currentTerm, success: true, matchIndex: this.lastLogIndex() };
         }
 
-        // Consistency check on the entry preceding the new ones.
+        // Consistency check on the entry preceding the new ones. On failure, return
+        // an accelerated-backtracking hint so the leader can skip a whole term.
         const prevTerm = this.termAt(args.prevLogIndex);
-        if (prevTerm === undefined || prevTerm !== args.prevLogTerm) {
-            return { term: this.currentTerm, success: false };
+        if (prevTerm === undefined) {
+            // Our log is too short to reach prevLogIndex.
+            return { term: this.currentTerm, success: false, conflictIndex: this.lastLogIndex() + 1 };
+        }
+        if (prevTerm !== args.prevLogTerm) {
+            // We have a conflicting term here — report it and where it first appears.
+            return {
+                term: this.currentTerm,
+                success: false,
+                conflictTerm: prevTerm,
+                conflictIndex: this.firstIndexOfTerm(args.prevLogIndex, prevTerm),
+            };
         }
 
         // Append new entries, overwriting any conflicting suffix.

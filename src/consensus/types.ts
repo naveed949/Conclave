@@ -106,6 +106,14 @@ export interface AppendEntriesReply {
     success: boolean;
     /** Index of the last entry the follower now has in sync (success only). */
     matchIndex?: number;
+    /**
+     * Accelerated log backtracking hint (failure only): the term of the conflicting
+     * entry at `prevLogIndex` (or omitted if the follower's log is simply too short),
+     * and the first log index the leader should retry from. Lets the leader skip a
+     * whole conflicting term per round trip instead of decrementing by one.
+     */
+    conflictTerm?: number;
+    conflictIndex?: number;
 }
 
 /** Sent by a leader to a follower that has fallen behind the leader's log snapshot. */
