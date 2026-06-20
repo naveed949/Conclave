@@ -10,6 +10,8 @@ import { ApplyResult, Book, Command } from './types';
  */
 export class BookStateMachine {
     private books = new Map<string, Book>();
+    /** Secondary index isbn -> id, so duplicate-ISBN checks are O(1), not O(n). */
+    private idByIsbn = new Map<string, string>();
 
     /** Apply a committed command. Must be deterministic. */
     apply(command: Command): ApplyResult {
@@ -23,11 +25,11 @@ export class BookStateMachine {
 
             case 'ADD': {
                 const { book } = command;
-                const duplicate = [...this.books.values()].some((b) => b.isbn === book.isbn);
-                if (duplicate) {
+                if (this.idByIsbn.has(book.isbn)) {
                     return { status: 400, message: 'A book with this ISBN already exists' };
                 }
                 this.books.set(book.id, { ...book });
+                this.idByIsbn.set(book.isbn, book.id);
                 return { status: 201, book: { ...book } };
             }
 
@@ -35,13 +37,20 @@ export class BookStateMachine {
                 const book = this.books.get(command.id);
                 if (!book) return { status: 404, message: 'Book not found' };
                 const updated: Book = { ...book, ...command.fields, id: book.id };
+                // Keep the isbn index in sync if the ISBN changed.
+                if (updated.isbn !== book.isbn) {
+                    this.idByIsbn.delete(book.isbn);
+                    this.idByIsbn.set(updated.isbn, book.id);
+                }
                 this.books.set(book.id, updated);
                 return { status: 200, book: { ...updated } };
             }
 
             case 'DELETE': {
-                if (!this.books.has(command.id)) return { status: 404, message: 'Book not found' };
+                const book = this.books.get(command.id);
+                if (!book) return { status: 404, message: 'Book not found' };
                 this.books.delete(command.id);
+                this.idByIsbn.delete(book.isbn);
                 return { status: 200, message: 'Book removed' };
             }
 
@@ -86,7 +95,11 @@ export class BookStateMachine {
     /** Replace all books (used when restoring from a snapshot). */
     load(books: Book[]): void {
         this.books.clear();
-        for (const b of books) this.books.set(b.id, { ...b });
+        this.idByIsbn.clear();
+        for (const b of books) {
+            this.books.set(b.id, { ...b });
+            this.idByIsbn.set(b.isbn, b.id);
+        }
     }
 
     get(id: string): Book | undefined {
