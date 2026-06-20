@@ -332,11 +332,11 @@ export class RaftNode implements RpcHandler {
     }
 
     /**
-     * Propose a command. Resolves once the entry is committed and applied.
-     * Throws {@link NotLeaderError} if this node is not the leader.
+     * Propose a command. Resolves once the entry is committed and applied, and
+     * rejects with {@link NotLeaderError} if this node is not the leader.
      */
     submit(command: Command, meta?: CommandMeta): Promise<ApplyResult> {
-        if (this.role !== 'leader') throw new NotLeaderError(this.leaderId);
+        if (this.role !== 'leader') return Promise.reject(new NotLeaderError(this.leaderId));
 
         const entry: LogEntry = { term: this.currentTerm, command, meta };
         this.log.push(entry);
