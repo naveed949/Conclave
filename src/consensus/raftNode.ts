@@ -914,6 +914,9 @@ export class RaftNode implements RpcHandler {
         m.raftDedupCacheSize.set(this.stateMachine.dedupCacheSize(), { node });
         m.raftClusterSize.set(this.members.size, { node });
         m.booksTotal.set(this.stateMachine.size(), { node });
+        // Rebuild the per-peer lag series each scrape so a removed peer (or one we
+        // no longer lead) doesn't leave a stale gauge behind forever.
+        m.raftReplicationLag.reset();
         if (this.role === 'leader') {
             const last = this.lastLogIndex();
             for (const peer of this.otherMembers()) {
