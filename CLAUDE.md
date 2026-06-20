@@ -37,16 +37,22 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
     helpers, never raw `log[i]`. **Configuration is derived from the log** (the
     latest `CONFIG` entry over `baseConfig`); change quorum/peer logic via
     `members`/`quorum()`/`otherMembers()`, never a fixed peer list.
-  - `stateMachine.ts` / `replicatedStateMachine.ts` — deterministic book store;
-    the latter adds the audit hash-chain + idempotency on the apply path.
+  - `stateMachine.ts` — the generic `StateMachine<C, T>` **interface** an
+    application implements; the consensus core is domain-agnostic (ADR-0017).
+  - `replicatedStateMachine.ts` — wraps any application state machine, adding the
+    audit hash-chain + idempotency on the apply path.
   - `transport.ts` — `HttpTransport` (prod) / `LocalTransport` (tests).
   - `storage.ts` — `FileStorage` / `MemoryStorage` (term, vote, log, snapshots).
 - `src/platform/` — cross-cutting concerns: `logger`, `metrics`,
   `requestContext` (tracing), `forward` (leader forwarding).
-- `src/controllers`, `src/routes`, `src/app.ts` — thin HTTP adapter over the node.
-- `src/server.ts` — wires a node from env and starts it.
+- `src/models/book.ts`, `src/models/bookStateMachine.ts` — the **example app**: a
+  `StateMachine` for books + its command builders (not part of the framework).
+- `src/controllers`, `src/routes`, `src/app.ts` — thin HTTP adapter over the node
+  for the book example (audit/raft routes are generic over any node).
+- `src/server.ts` — wires a node (with `BookStateMachine`) from env and starts it.
+- `src/index.ts` — public library surface (embedded-library use).
 - `tests/` — `consensus`, `bookApi`, `platform`, `snapshot`, `readBarrier`,
-  `membership` (+ `helpers.ts`).
+  `membership`, `crashConsistency`, `logBacktracking` (+ `helpers.ts`).
 
 ## Invariants — do not break these
 
@@ -73,9 +79,14 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
   `fs`, `async_hooks`) over new packages. Don't add deps casually.
 - Use the structured `Logger`, not `console.log` (errors may use `console.error`
   only where a logger isn't available).
-- Adding a new command type: extend the `Command` union in `consensus/types.ts`,
-  handle it in `stateMachine.ts` (the `switch` is exhaustiveness-checked), and add
-  a leader-side builder in `models/book.ts`.
+- Adding a new command type (to an application, e.g. the book example): extend
+  that app's command union (`models/book.ts`), handle it in the app's
+  `StateMachine.apply` (`models/bookStateMachine.ts`; the `switch` is
+  exhaustiveness-checked), and add a leader-side builder. The framework reserves
+  the `NOOP` and `CONFIG` command types — app command types must not use them.
+- Building a new application: implement `StateMachine<C, T>`
+  (`consensus/stateMachine.ts`) and wire it via
+  `new RaftNode({ stateMachine, … })`. Don't add domain types to `consensus/`.
 
 ## Testing notes
 

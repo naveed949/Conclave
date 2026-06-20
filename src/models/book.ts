@@ -1,7 +1,39 @@
 import { randomUUID } from 'crypto';
-import { Book, Command } from '../consensus/types';
 
-export { Book } from '../consensus/types';
+/**
+ * The library-book example application. This is NOT part of the framework — it
+ * is a sample {@link StateMachine} (in `bookStateMachine.ts`) plus the command
+ * types and builders that drive it, showing how an application plugs into the
+ * consensus core. Swap this out for payments, inventory, a feature-flag store,
+ * or anything else with a deterministic state machine.
+ */
+
+/** A book as stored in the replicated state machine. */
+export interface Book {
+    id: string;
+    title: string;
+    author: string;
+    publisher: string;
+    isbn: string;
+    copies: number;
+    totalCopies: number;
+    borrowedBy: string | null;
+    borrowedDate: string | null; // ISO timestamp
+    dueDate: string | null; // ISO timestamp
+}
+
+/**
+ * The book application's command union. Each command is a plain object with a
+ * string `type` (the framework's only requirement, {@link AppCommand}). The
+ * leader bakes every non-deterministic value into the command up front, so all
+ * replicas apply identical data.
+ */
+export type BookCommand =
+    | { type: 'ADD'; book: Book }
+    | { type: 'UPDATE'; id: string; fields: Partial<Omit<Book, 'id'>> }
+    | { type: 'DELETE'; id: string }
+    | { type: 'BORROW'; id: string; borrowedBy: string; borrowedDate: string; dueDate: string }
+    | { type: 'RETURN'; id: string };
 
 /** Shape of a create-book request body. */
 export interface BookInput {
@@ -20,7 +52,7 @@ const LOAN_PERIOD_DAYS = 7;
  * enters the replicated log applies identically on every node.
  */
 
-export function buildAddCommand(input: BookInput): Command {
+export function buildAddCommand(input: BookInput): BookCommand {
     const book: Book = {
         id: randomUUID(),
         title: input.title,
@@ -36,7 +68,7 @@ export function buildAddCommand(input: BookInput): Command {
     return { type: 'ADD', book };
 }
 
-export function buildUpdateCommand(id: string, fields: Partial<BookInput>): Command {
+export function buildUpdateCommand(id: string, fields: Partial<BookInput>): BookCommand {
     // Drop undefined keys so absent fields don't overwrite existing values.
     const clean: Partial<Book> = {};
     for (const [k, v] of Object.entries(fields)) {
@@ -45,11 +77,11 @@ export function buildUpdateCommand(id: string, fields: Partial<BookInput>): Comm
     return { type: 'UPDATE', id, fields: clean };
 }
 
-export function buildDeleteCommand(id: string): Command {
+export function buildDeleteCommand(id: string): BookCommand {
     return { type: 'DELETE', id };
 }
 
-export function buildBorrowCommand(id: string, borrowedBy: string): Command {
+export function buildBorrowCommand(id: string, borrowedBy: string): BookCommand {
     const borrowedDate = new Date();
     const dueDate = new Date(borrowedDate);
     dueDate.setDate(dueDate.getDate() + LOAN_PERIOD_DAYS);
@@ -62,6 +94,6 @@ export function buildBorrowCommand(id: string, borrowedBy: string): Command {
     };
 }
 
-export function buildReturnCommand(id: string): Command {
+export function buildReturnCommand(id: string): BookCommand {
     return { type: 'RETURN', id };
 }

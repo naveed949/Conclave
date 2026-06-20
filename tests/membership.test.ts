@@ -1,10 +1,11 @@
-import { RaftNode, RaftConfig, MembershipError } from '../src/consensus/raftNode';
+import { RaftNode, MembershipError } from '../src/consensus/raftNode';
 import { LocalTransport, RpcHandler } from '../src/consensus/transport';
 import { PeerInfo } from '../src/consensus/types';
 import { buildAddCommand } from '../src/models/book';
+import { BookNode, BookStateMachine } from '../src/models/bookStateMachine';
 import { waitFor } from './helpers';
 
-const TIMERS: Partial<RaftConfig> = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
+const TIMERS = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
 
 /**
  * A cluster whose registry + node set the test controls, so nodes can be added
@@ -13,20 +14,23 @@ const TIMERS: Partial<RaftConfig> = { electionMinMs: 50, electionMaxMs: 100, hea
 function makeCluster(ids: string[]) {
     const registry = new Map<string, RpcHandler>();
     const transport = new LocalTransport(registry, 1);
-    const nodes = new Map<string, RaftNode>();
+    const nodes = new Map<string, BookNode>();
 
     const peersFor = (id: string): PeerInfo[] =>
         ids.filter((p) => p !== id).map((p) => ({ id: p, url: `local://${p}` }));
 
     for (const id of ids) {
-        const node = new RaftNode({ id, peers: peersFor(id), selfUrl: `local://${id}`, ...TIMERS }, transport);
+        const node = new RaftNode(
+            { id, peers: peersFor(id), selfUrl: `local://${id}`, stateMachine: new BookStateMachine(), ...TIMERS },
+            transport,
+        );
         nodes.set(id, node);
         registry.set(id, node);
     }
     return { registry, transport, nodes, ids };
 }
 
-const leaderOf = (nodes: Iterable<RaftNode>) => [...nodes].find((n) => n.isLeader())!;
+const leaderOf = (nodes: Iterable<BookNode>) => [...nodes].find((n) => n.isLeader())!;
 const addBook = (isbn: string) =>
     buildAddCommand({ title: isbn, author: 'A', publisher: 'P', isbn, copies: 1 });
 
@@ -42,7 +46,13 @@ describe('Dynamic membership (single-server changes)', () => {
         // Spin up n4 (initially knows the existing peers) and add it to the config.
         const transport = c.transport;
         const n4 = new RaftNode(
-            { id: 'n4', peers: ['n1', 'n2', 'n3'].map((p) => ({ id: p, url: `local://${p}` })), selfUrl: 'local://n4', ...TIMERS },
+            {
+                id: 'n4',
+                peers: ['n1', 'n2', 'n3'].map((p) => ({ id: p, url: `local://${p}` })),
+                selfUrl: 'local://n4',
+                stateMachine: new BookStateMachine(),
+                ...TIMERS,
+            },
             transport,
         );
         c.registry.set('n4', n4);
@@ -53,7 +63,7 @@ describe('Dynamic membership (single-server changes)', () => {
 
         // n4 catches up: it learns the config and replays the pre-existing write.
         await waitFor(() => n4.status().members.length === 4);
-        await waitFor(() => n4.stateMachine.get(leader.stateMachine.getAll()[0].id) !== undefined);
+        await waitFor(() => n4.app.get(leader.app.getAll()[0].id) !== undefined);
         expect(leader.status().members.sort()).toEqual(['n1', 'n2', 'n3', 'n4']);
 
         // A new write now commits through the 4-node configuration and reaches n4.
