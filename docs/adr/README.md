@@ -29,6 +29,7 @@ supersedes the old one rather than editing history.
 | [0014](./0014-opt-in-linearizable-reads.md) | Opt-in linearizable reads via ReadIndex | Accepted |
 | [0015](./0015-dynamic-cluster-membership.md) | Dynamic cluster membership via single-server changes | Accepted |
 | [0016](./0016-crash-consistent-snapshot-persistence.md) | Crash-consistent snapshot/log persistence and snapshot transfer | Accepted |
+| [0017](./0017-application-logic-as-smart-contracts.md) | Deploying application logic as smart contracts on this framework | Proposed |
 
 ## Template
 
