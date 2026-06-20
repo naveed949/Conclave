@@ -31,7 +31,10 @@ export function createApp(node: RaftNode, deps: AppDeps = {}): Application {
         const start = Date.now();
         res.on('finish', () => {
             const durationMs = Date.now() - start;
-            const route = req.baseUrl || req.path;
+            // Use the matched route template (e.g. /books/:id), not the raw path, so
+            // per-id requests don't explode metric label cardinality. Unmatched
+            // requests (404s) collapse to a single constant label.
+            const route = req.route ? `${req.baseUrl}${req.route.path}` : req.baseUrl || 'unmatched';
             metrics?.httpRequests.inc({ method: req.method, route, status: res.statusCode });
             metrics?.httpDuration.observe(durationMs, { method: req.method, route });
             logger?.info('http_request', {
