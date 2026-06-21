@@ -1,4 +1,6 @@
 import { createContext } from './context';
+import { moduleCodeHash } from './codeHash';
+import { AuditLeaf, MerkleAudit, MerkleProof } from './merkleAudit';
 import {
     EffectIntent,
     EffectResultEntry,
@@ -39,6 +41,23 @@ export class ModuleHost {
      * re-run its reducer but never re-enqueue the same effect.
      */
     private readonly outbox = new Map<string, OutboxEntry>();
+    /**
+     * Per-module code-version hash (ADR-0018 pillar 5), computed at `register()`
+     * from the module's logic. Every audited leaf stamps the hash of the module
+     * that produced it, so the history proves WHICH logic version ran.
+     */
+    private readonly codeHashes = new Map<string, string>();
+    /**
+     * The Merkle audit accumulator (ADR-0018 pillar 5). Replicated state: it is
+     * derived purely from the applied command stream, so two hosts fed the same
+     * stream produce the same `auditRoot()`. Folded into `snapshot()`/`restore()`.
+     */
+    private readonly audit = new MerkleAudit();
+    /**
+     * Monotonic audit sequence, advanced once per audited leaf. Deterministic
+     * (driven only by the command stream), it is each leaf's `seq` / index.
+     */
+    private auditSeq = 0;
 
     /** Register a module and initialize its state. Throws on a duplicate name. */
     register(def: ModuleDefinition<any>): void {
@@ -59,6 +78,9 @@ export class ModuleHost {
         }
         this.modules.set(def.name, def as ModuleDefinition<unknown>);
         this.states.set(def.name, def.initialState());
+        // Stamp the module's logic version now; every leaf it later produces
+        // records this hash (ADR-0018 pillar 5).
+        this.codeHashes.set(def.name, moduleCodeHash(def));
     }
 
     /**
@@ -110,17 +132,45 @@ export class ModuleHost {
         // host state. Live state is replaced atomically only on a clean return.
         const working = deepClone(this.states.get(cmd.module));
 
+        // The reducer is about to run, so this command WILL be audited regardless
+        // of its outcome (success, business-failure status, or thrown→500). The
+        // earlier unknown-module/unknown-command 404s returned before this point
+        // and are intentionally NOT audited — no logic ran for them.
+        let outcome: ModuleApplyResult;
         try {
             const result = reducer(working, cmd.input, ctx);
             this.states.set(cmd.module, result.state);
             // Surface the reducer's explicit `result` value, not the whole
             // ReducerResult — callers get a purpose-built value, not next-state.
-            return { status: 200, result: result.result, effects: result.effects ?? [] };
+            outcome = { status: 200, result: result.result, effects: result.effects ?? [] };
         } catch (err) {
             // A throwing reducer must not corrupt state or halt the host; report it.
             const message = err instanceof Error ? err.message : String(err);
-            return { status: 500, effects: [], message };
+            outcome = { status: 500, effects: [], message };
         }
+
+        this.recordAudit(cmd, meta, outcome.status);
+        return outcome;
+    }
+
+    /**
+     * Append one audit leaf for a command whose reducer ran. The leaf is a pure
+     * function of the command + meta + outcome status + the producing module's
+     * code hash, so every replica appends an identical leaf and the Merkle root
+     * stays convergent. `seq` is the monotonic, deterministic audit index.
+     */
+    private recordAudit(cmd: ModuleCommand, meta: { actor: string; requestId: string }, status: number): void {
+        const leaf: AuditLeaf = {
+            seq: this.auditSeq,
+            module: cmd.module,
+            command: cmd.command,
+            actor: meta.actor,
+            requestId: meta.requestId,
+            status,
+            codeHash: this.codeHashes.get(cmd.module) ?? '',
+        };
+        this.audit.append(leaf);
+        this.auditSeq += 1;
     }
 
     /** All outbox entries still awaiting execution at the edge. */
@@ -229,7 +279,12 @@ export class ModuleHost {
         for (const key of [...this.outbox.keys()].sort()) {
             outbox[key] = deepClone(this.outbox.get(key)!);
         }
-        return { ...states, __outbox: outbox };
+        // The Merkle audit + its seq are replicated state too: emit them under the
+        // reserved `__audit` key (collision-safe — `__`-prefixed module names are
+        // rejected at registration). Storing the leaves alone is sufficient; the
+        // tree and root are a pure function of them, rebuilt on restore.
+        const auditSnap = { seq: this.auditSeq, ...this.audit.snapshot() };
+        return { ...states, __outbox: outbox, __audit: auditSnap };
     }
 
     /**
@@ -253,5 +308,49 @@ export class ModuleHost {
                 this.outbox.set(key, deepClone(entry));
             }
         }
+        // Rebuild the Merkle audit from its reserved key. The accumulator
+        // recomputes all leaf hashes (and thus the root) deterministically, so a
+        // restored host reports the identical `auditRoot()`.
+        const auditSaved = snap.__audit as { seq?: number; leaves?: AuditLeaf[] } | undefined;
+        this.audit.restore({ leaves: auditSaved?.leaves ?? [] });
+        this.auditSeq = auditSaved?.seq ?? this.audit.size();
+    }
+
+    // ---- audit access (ADR-0018 pillar 5) ----
+
+    /**
+     * The compact Merkle root over all audited commands. A single hash that
+     * summarizes the entire history and can be externally anchored; identical on
+     * every replica that applied the same command stream.
+     */
+    auditRoot(): string {
+        return this.audit.root();
+    }
+
+    /**
+     * An O(log n) inclusion proof that the leaf at `seq` is part of the audited
+     * history. Verifies against `auditRoot()` via `MerkleAudit.verify`.
+     */
+    auditProof(seq: number): MerkleProof {
+        return this.audit.proof(seq);
+    }
+
+    /** Every audit leaf in append order (for inspection/tests). */
+    auditEntries(): AuditLeaf[] {
+        return this.audit.leaves();
+    }
+
+    /** Number of audited commands. */
+    auditSize(): number {
+        return this.audit.size();
+    }
+
+    /**
+     * The code-version hash recorded for a module (or `undefined` if the module
+     * is not registered). The same value every audited leaf from that module
+     * carries — letting a verifier confirm which logic version produced a result.
+     */
+    moduleCodeHash(module: string): string | undefined {
+        return this.codeHashes.get(module);
     }
 }

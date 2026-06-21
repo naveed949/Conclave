@@ -124,6 +124,13 @@ export type Query<S> = (state: S, args: unknown) => unknown;
 /** A self-contained unit of application logic: its state, commands, and queries. */
 export interface ModuleDefinition<S> {
     name: string;
+    /**
+     * Semantic version of the module's LOGIC (ADR-0018 pillar 5). Optional;
+     * defaults to `'0'` when unset. It participates in the module's code hash, so
+     * bumping it produces a distinct `codeHash` even if the reducer source is
+     * byte-identical — letting an operator force a recorded version boundary.
+     */
+    version?: string;
     /** Builds the empty initial state. A factory (not a value) so each host gets its own. */
     initialState: () => S;
     commands: Record<string, Reducer<S>>;
