@@ -91,7 +91,9 @@ describe('InstallSnapshot follower safety', () => {
             lastIncludedIndex: 0, // <= our boundary/commit: stale
             lastIncludedTerm: 0,
             members: [{ id: 'n1', url: 'local://n1' }, { id: 'n2', url: 'local://n2' }],
-            data: { books: [], audit: [], seen: [], lastHash: '0'.repeat(64) },
+            offset: 0,
+            data: JSON.stringify({ books: [], audit: [], seen: [], lastHash: '0'.repeat(64) }),
+            done: true,
         } as InstallSnapshotArgs);
 
         expect(reply.term).toBe(before.term);

@@ -42,6 +42,8 @@ export interface RaftConfig<
     heartbeatMs?: number;
     /** Take a snapshot once the in-memory log holds this many entries. */
     snapshotThreshold?: number;
+    /** Max size (in characters) of a single InstallSnapshot chunk on the wire. */
+    snapshotChunkBytes?: number;
     /** Cap on the idempotency dedup cache (remembered requestIds). FIFO eviction. */
     dedupLimit?: number;
     /** Optional observability/durability collaborators (tests omit them). */
@@ -131,6 +133,10 @@ export class RaftNode<
     // Leader-only volatile state.
     private nextIndex = new Map<string, number>();
     private matchIndex = new Map<string, number>();
+    // Peers we are currently streaming a (multi-chunk) snapshot to. Prevents a
+    // heartbeat from starting a second, interleaving stream to the same peer —
+    // concurrent offset===0 chunks would reset each other's reassembly buffer.
+    private snapshotInFlight = new Set<string>();
 
     // Timers.
     private electionTimer: NodeJS.Timeout | null = null;
@@ -146,7 +152,19 @@ export class RaftNode<
     private readonly electionMaxMs: number;
     private readonly heartbeatMs: number;
     private readonly snapshotThreshold: number;
+    private readonly snapshotChunkBytes: number;
     private running = false;
+
+    // Per-node reassembly buffer for an in-flight chunked InstallSnapshot stream.
+    // Keyed by snapshot identity (lastIncludedIndex+term); reset on a fresh
+    // offset===0 chunk, a gap, or a mismatched identity (fail closed — the leader
+    // retries from offset 0). Bounded by the size of one snapshot.
+    private snapshotBuffer: {
+        lastIncludedIndex: number;
+        lastIncludedTerm: number;
+        nextOffset: number;
+        data: string;
+    } | null = null;
 
     constructor(config: RaftConfig<C, T, SM>, transport: Transport) {
         this.id = config.id;
@@ -159,6 +177,7 @@ export class RaftNode<
         this.electionMaxMs = config.electionMaxMs ?? 300;
         this.heartbeatMs = config.heartbeatMs ?? 50;
         this.snapshotThreshold = config.snapshotThreshold ?? 1000;
+        this.snapshotChunkBytes = config.snapshotChunkBytes ?? 64 * 1024;
         this.app = config.stateMachine;
         this.rsm = new ReplicatedStateMachine<C, T>(this.app, config.dedupLimit);
         // Bootstrap configuration: the peers from env plus this node itself.
@@ -570,6 +589,7 @@ export class RaftNode<
         const nextIdx = this.lastLogIndex() + 1;
         this.nextIndex.clear();
         this.matchIndex.clear();
+        this.snapshotInFlight.clear();
         for (const peer of this.otherMembers()) {
             this.nextIndex.set(peer.id, nextIdx);
             this.matchIndex.set(peer.id, 0);
@@ -669,6 +689,9 @@ export class RaftNode<
 
         // The entry the follower needs has been compacted away — ship a snapshot.
         if (nextIdx <= this.lastIncludedIndex) {
+            // Skip if a snapshot stream to this peer is already in progress, so a
+            // heartbeat can't start an interleaving second stream from offset 0.
+            if (this.snapshotInFlight.has(peer.id)) return true;
             return this.sendSnapshot(peer);
         }
 
@@ -730,26 +753,63 @@ export class RaftNode<
         // snapshot exists (nextIndex <= lastIncludedIndex >= 1).
         const durable = this.storage.loadSnapshot();
         const snapIndex = durable?.lastIncludedIndex ?? this.lastIncludedIndex;
-        const args: InstallSnapshotArgs = {
-            term,
-            leaderId: this.id,
-            lastIncludedIndex: snapIndex,
-            lastIncludedTerm: durable?.lastIncludedTerm ?? this.lastIncludedTerm,
-            members: durable?.members ?? this.configAt(snapIndex),
-            data: durable?.data ?? this.rsm.snapshot(),
-        };
-        this.logger?.info('sending snapshot', { peer: peer.id, lastIncludedIndex: snapIndex });
+        const lastIncludedTerm = durable?.lastIncludedTerm ?? this.lastIncludedTerm;
+        const members = durable?.members ?? this.configAt(snapIndex);
+        const data = durable?.data ?? this.rsm.snapshot();
 
-        const reply = await this.transport.sendInstallSnapshot(peer, args);
-        if (!reply || this.role !== 'leader' || this.currentTerm !== term) return false;
-        if (reply.term > this.currentTerm) {
-            this.becomeFollower(reply.term);
-            return false;
+        // Serialize the snapshot's data ONCE, then stream byte/character slices.
+        // Reassembled on the follower this yields a byte-identical string, so
+        // JSON.parse recovers exactly the durable snapshot object.
+        const serialized = JSON.stringify(data);
+        const chunkSize = this.snapshotChunkBytes;
+        this.logger?.info('sending snapshot', {
+            peer: peer.id,
+            lastIncludedIndex: snapIndex,
+            bytes: serialized.length,
+        });
+
+        // Send chunks SEQUENTIALLY, awaiting each reply before the next so the
+        // follower reassembles in order. A snapshot whose serialized data fits in
+        // one chunk sends exactly one `done` chunk (parity with the single RPC).
+        // `snapshotInFlight` prevents a heartbeat from launching a second,
+        // interleaving stream to the same peer while this one is mid-flight.
+        this.snapshotInFlight.add(peer.id);
+        try {
+            let offset = 0;
+            do {
+                const slice = serialized.slice(offset, offset + chunkSize);
+                const done = offset + slice.length >= serialized.length;
+                const args: InstallSnapshotArgs = {
+                    term,
+                    leaderId: this.id,
+                    lastIncludedIndex: snapIndex,
+                    lastIncludedTerm,
+                    members,
+                    offset,
+                    data: slice,
+                    done,
+                };
+
+                const reply = await this.transport.sendInstallSnapshot(peer, args);
+                // Abort if the reply is lost, we lost leadership, or the term moved
+                // on mid-stream — leader (or its successor) restarts from offset 0.
+                if (!reply || this.role !== 'leader' || this.currentTerm !== term) return false;
+                if (reply.term > this.currentTerm) {
+                    this.becomeFollower(reply.term);
+                    return false;
+                }
+
+                if (done) {
+                    this.matchIndex.set(peer.id, snapIndex);
+                    this.nextIndex.set(peer.id, snapIndex + 1);
+                    this.advanceCommitIndex();
+                    return true;
+                }
+                offset += slice.length;
+            } while (true);
+        } finally {
+            this.snapshotInFlight.delete(peer.id);
         }
-        this.matchIndex.set(peer.id, snapIndex);
-        this.nextIndex.set(peer.id, snapIndex + 1);
-        this.advanceCommitIndex();
-        return true;
     }
 
     handleAppendEntries(args: AppendEntriesArgs): AppendEntriesReply {
@@ -829,10 +889,61 @@ export class RaftNode<
 
         // Ignore a snapshot we've already covered (don't roll back our own state).
         if (args.lastIncludedIndex <= this.lastIncludedIndex || args.lastIncludedIndex <= this.commitIndex) {
+            this.snapshotBuffer = null;
             return { term: this.currentTerm };
         }
 
-        this.rsm.restore(args.data as RsmSnapshot<T>);
+        // --- Chunk reassembly (Raft figure 13) ---
+        // A new offset===0 chunk starts (or restarts) a buffer, superseding any
+        // partial stream. Subsequent chunks must contiguously extend the buffer for
+        // the SAME snapshot identity; any gap, mismatched identity, or out-of-order
+        // offset is rejected — we drop the buffer and reply success without
+        // installing, so the leader retries cleanly from offset 0 (fail closed:
+        // never install a corrupt, partially-reassembled snapshot).
+        // The buffer is bounded by the size of one legitimate snapshot: under the
+        // CFT (non-Byzantine) trust model the leader is honest, so it always sends
+        // `done` and never streams unbounded chunks. A Byzantine leader is out of
+        // scope (ADR-0021).
+        if (args.offset === 0) {
+            this.snapshotBuffer = {
+                lastIncludedIndex: args.lastIncludedIndex,
+                lastIncludedTerm: args.lastIncludedTerm,
+                nextOffset: 0,
+                data: '',
+            };
+        }
+        const buf = this.snapshotBuffer;
+        if (
+            !buf ||
+            buf.lastIncludedIndex !== args.lastIncludedIndex ||
+            buf.lastIncludedTerm !== args.lastIncludedTerm ||
+            buf.nextOffset !== args.offset
+        ) {
+            // Out-of-order / mismatched chunk: discard the partial buffer.
+            this.snapshotBuffer = null;
+            return { term: this.currentTerm };
+        }
+        buf.data += args.data;
+        buf.nextOffset += args.data.length;
+
+        // A non-final chunk is acked without installing.
+        if (!args.done) {
+            return { term: this.currentTerm };
+        }
+
+        // Final chunk: reassembly complete. Parse the full string back into the
+        // snapshot data object. A corrupt reassembly (which JSON.parse rejects)
+        // resets the buffer and acks without installing, so the leader retries.
+        let snapshotData: RsmSnapshot<T>;
+        try {
+            snapshotData = JSON.parse(buf.data) as RsmSnapshot<T>;
+        } catch {
+            this.snapshotBuffer = null;
+            return { term: this.currentTerm };
+        }
+        this.snapshotBuffer = null;
+
+        this.rsm.restore(snapshotData);
 
         // Raft figure 13, step 6: if we already have the entry at the snapshot's
         // last-included index with a matching term, the snapshot is just a prefix
@@ -859,7 +970,7 @@ export class RaftNode<
             lastIncludedIndex: this.lastIncludedIndex,
             lastIncludedTerm: this.lastIncludedTerm,
             members: args.members,
-            data: args.data,
+            data: snapshotData,
         });
         this.persist();
         this.logger?.info('installed snapshot', { lastIncludedIndex: this.lastIncludedIndex, keptTail: tail.length });
