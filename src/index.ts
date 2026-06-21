@@ -54,6 +54,9 @@ export type { KeyedModuleDefinition, KeyedReducer } from './runtime/keyedModule'
 export { buildModuleCommand, buildSignedModuleCommand } from './runtime/command';
 export { resolveSeed, createContext } from './runtime/context';
 export { EffectExecutor } from './runtime/effectExecutor';
+// The live, in-cluster counterpart of `EffectExecutor` (M12): the leadership-aware
+// driver that drains the outbox post-commit and rides results back through the log.
+export { EffectDriver } from './runtime/effectDriver';
 export { defineProjection } from './runtime/projection';
 export { ProjectionHost } from './runtime/projectionHost';
 export { MemoryStateStore, StoreView } from './runtime/stateStore';
@@ -64,6 +67,8 @@ export { runSaga } from './runtime/saga';
 export type {
     ModuleDefinition,
     ModuleAppCommand,
+    ModuleInvokeCommand,
+    ModuleEffectResultCommand,
     ModuleCommand,
     ModuleApplyResult,
     Reducer,

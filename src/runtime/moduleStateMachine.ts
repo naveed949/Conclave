@@ -35,6 +35,18 @@ export class ModuleStateMachine implements StateMachine<ModuleAppCommand, unknow
     }
 
     apply(command: ModuleAppCommand): ApplyResult<unknown> {
+        // Route on the application `type` discriminator. A caller invoke
+        // (`'MODULE'`) runs the reducer; a committed effect result
+        // (`'MODULE_EFFECT_RESULT'`, M12) routes to `applyEffectResult` so the
+        // edge-resolved outcome folds back into state identically on every node.
+        if (command.type === 'MODULE_EFFECT_RESULT') {
+            const result = this.host.applyEffectResult(command.entry, {
+                actor: command.actor,
+                requestId: command.requestId,
+            });
+            return { status: result.status, data: result.result, message: result.message };
+        }
+
         const result = this.host.apply(
             {
                 module: command.module,
@@ -46,7 +58,7 @@ export class ModuleStateMachine implements StateMachine<ModuleAppCommand, unknow
             { actor: command.actor, requestId: command.requestId },
         );
         // The runtime's `effects` stay in the host's outbox (drained post-commit
-        // by the EffectExecutor); the substrate only needs status/data/message.
+        // by the EffectDriver); the substrate only needs status/data/message.
         return { status: result.status, data: result.result, message: result.message };
     }
 
