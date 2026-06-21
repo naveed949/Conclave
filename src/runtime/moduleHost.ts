@@ -1,5 +1,12 @@
 import { createContext } from './context';
-import { ModuleApplyResult, ModuleCommand, ModuleDefinition } from './types';
+import {
+    EffectIntent,
+    EffectResultEntry,
+    ModuleApplyResult,
+    ModuleCommand,
+    ModuleDefinition,
+    OutboxEntry,
+} from './types';
 
 /**
  * Deep-clone via JSON round-trip. Used so snapshots are decoupled from live
@@ -24,9 +31,29 @@ export class ModuleHost {
     private readonly modules = new Map<string, ModuleDefinition<unknown>>();
     /** Live per-module state, keyed by module name. */
     private readonly states = new Map<string, unknown>();
+    /**
+     * The deterministic outbox (ADR-0018 pillar 3), keyed by `idempotencyKey`.
+     * Every host derives it from the same committed command stream, so it is
+     * itself replicated state — part of `snapshot()`/`restore()`. Keying on the
+     * idempotency key is what makes enqueue idempotent: a replayed command can
+     * re-run its reducer but never re-enqueue the same effect.
+     */
+    private readonly outbox = new Map<string, OutboxEntry>();
 
     /** Register a module and initialize its state. Throws on a duplicate name. */
     register(def: ModuleDefinition<any>): void {
+        if (!def.name || def.name.trim() === '') {
+            throw new Error('Module definition requires a non-empty name');
+        }
+        // Reject reserved `__`-prefixed names: the snapshot stores the outbox
+        // under the reserved `__outbox` key in the same flat module-states object,
+        // so a `__`-prefixed module would silently collide (its state overwritten
+        // on snapshot, misread as an outbox map on restore). Fail closed.
+        if (def.name.startsWith('__')) {
+            throw new Error(
+                `Module name "${def.name}" is reserved: names starting with "__" are reserved for runtime internals`,
+            );
+        }
         if (this.modules.has(def.name)) {
             throw new Error(`Module "${def.name}" is already registered`);
         }
@@ -42,6 +69,27 @@ export class ModuleHost {
      * single bad command never crashes the apply loop.
      */
     apply(cmd: ModuleCommand, meta: { actor: string; requestId: string }): ModuleApplyResult {
+        const result = this.dispatch(cmd, meta);
+        if (result.status === 200) {
+            // Record each emitted effect into the outbox as `pending`, but only if
+            // its key is unknown — a replayed command must re-run deterministically
+            // without re-enqueuing the same effect (the exactly-once dedup point).
+            for (const intent of result.effects) {
+                if (!this.outbox.has(intent.idempotencyKey)) {
+                    this.outbox.set(intent.idempotencyKey, { intent, status: 'pending' });
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * The reducer dispatch path, shared by `apply` (caller commands) and
+     * `applyEffectResult` (the committed `onResult` follow-up). It runs a pure
+     * reducer against a clone of current state and adopts the result atomically;
+     * it does NOT touch the outbox so callers can layer their own bookkeeping.
+     */
+    private dispatch(cmd: ModuleCommand, meta: { actor: string; requestId: string }): ModuleApplyResult {
         const def = this.modules.get(cmd.module);
         if (!def) {
             return { status: 404, effects: [], message: `Unknown module: ${cmd.module}` };
@@ -75,6 +123,78 @@ export class ModuleHost {
         }
     }
 
+    /** All outbox entries still awaiting execution at the edge. */
+    pendingEffects(): EffectIntent[] {
+        const out: EffectIntent[] = [];
+        for (const name of [...this.outbox.keys()].sort()) {
+            const entry = this.outbox.get(name)!;
+            if (entry.status === 'pending') {
+                // Deep-clone (like getOutbox) so a handler that mutates the intent
+                // it receives cannot mutate the committed outbox state behind it.
+                out.push(deepClone(entry.intent));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Apply a committed `EffectResultEntry` — the follow-up entry the executor
+     * fed back after performing the effect at the edge. This runs on the
+     * deterministic apply path on EVERY replica, so it must be a pure function of
+     * the entry + current state, and it MUST be idempotent: a redelivered or
+     * replayed result must not re-dispatch the `onResult` reducer.
+     *
+     * Idempotency rule: if the key is unknown or already `done`, no-op (200, no
+     * dispatch). Otherwise mark the entry `done`, store the edge-resolved
+     * `result`, and — if the intent named an `onResult` command — dispatch it
+     * through the normal reducer path with the entry's leader-resolved `seed`, so
+     * the consuming reducer stays deterministic.
+     */
+    applyEffectResult(entry: EffectResultEntry, meta: { actor: string; requestId: string }): ModuleApplyResult {
+        // First-applied wins. A handler retry that fires before the first result
+        // is applied can commit multiple `EffectResultEntry` values for one key
+        // (each drain that completes submits one). That is fine: the FIRST entry
+        // applied flips the key to `done`; every later entry for that key hits the
+        // `done` guard below and no-ops. Convergence holds because the committed
+        // log order is identical on every replica, so all replicas apply the same
+        // "first" entry and discard the same rest.
+        const slot = this.outbox.get(entry.idempotencyKey);
+        if (!slot || slot.status === 'done') {
+            // Unknown or already-applied: exactly-once at the state level means
+            // this is a harmless no-op, never a second `onResult` dispatch.
+            return { status: 200, effects: [] };
+        }
+
+        slot.status = 'done';
+        slot.result = entry.result;
+
+        const onResult = slot.intent.onResult;
+        if (!onResult) {
+            return { status: 200, effects: [] };
+        }
+
+        // Feed the edge-resolved result to the consuming reducer. We go through
+        // `apply` (not bare `dispatch`) so any effects the onResult reducer emits
+        // are themselves enqueued into the outbox.
+        return this.apply(
+            {
+                module: onResult.module,
+                command: onResult.command,
+                input: { idempotencyKey: entry.idempotencyKey, result: entry.result },
+                seed: entry.seed,
+            },
+            meta,
+        );
+    }
+
+    /**
+     * The outbox as a list in deterministic (sorted-by-key) order. For tests and
+     * inspection; the canonical store is the keyed map.
+     */
+    getOutbox(): OutboxEntry[] {
+        return [...this.outbox.keys()].sort().map((k) => deepClone(this.outbox.get(k)!));
+    }
+
     /** Run a read query against current state. Never mutates. */
     query(module: string, name: string, args?: unknown): unknown {
         const def = this.modules.get(module);
@@ -99,11 +219,17 @@ export class ModuleHost {
      * of module registration order (helps the later audit/hash-chain milestone).
      */
     snapshot(): Record<string, unknown> {
-        const out: Record<string, unknown> = {};
+        const states: Record<string, unknown> = {};
         for (const name of [...this.states.keys()].sort()) {
-            out[name] = deepClone(this.states.get(name));
+            states[name] = deepClone(this.states.get(name));
         }
-        return out;
+        // The outbox is replicated state too: emit it under a reserved key, also
+        // in sorted-key order so `JSON.stringify` over the snapshot is stable.
+        const outbox: Record<string, OutboxEntry> = {};
+        for (const key of [...this.outbox.keys()].sort()) {
+            outbox[key] = deepClone(this.outbox.get(key)!);
+        }
+        return { ...states, __outbox: outbox };
     }
 
     /**
@@ -116,6 +242,15 @@ export class ModuleHost {
         for (const name of this.modules.keys()) {
             if (Object.prototype.hasOwnProperty.call(snap, name)) {
                 this.states.set(name, deepClone(snap[name]));
+            }
+        }
+        // Rebuild the outbox from its reserved key. Replacing wholesale (not
+        // merging) keeps restore a faithful point-in-time reconstruction.
+        this.outbox.clear();
+        const saved = snap.__outbox;
+        if (saved && typeof saved === 'object') {
+            for (const [key, entry] of Object.entries(saved as Record<string, OutboxEntry>)) {
+                this.outbox.set(key, deepClone(entry));
             }
         }
     }

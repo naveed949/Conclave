@@ -14,6 +14,16 @@ export function defineModule<S>(def: ModuleDefinition<S>): ModuleDefinition<S> {
         throw new Error('Module definition requires a non-empty name');
     }
 
+    // Names starting with `__` are reserved for runtime internals — the snapshot
+    // stores the outbox under the reserved `__outbox` key in the same flat
+    // module-states object, so a `__`-prefixed module would silently collide.
+    // Fail closed at definition time rather than corrupt a snapshot later.
+    if (def.name.startsWith('__')) {
+        throw new Error(
+            `Module name "${def.name}" is reserved: names starting with "__" are reserved for runtime internals`,
+        );
+    }
+
     const commandNames = Object.keys(def.commands ?? {});
     if (commandNames.length === 0) {
         throw new Error(`Module "${def.name}" must define at least one command`);

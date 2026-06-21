@@ -12,15 +12,70 @@
 
 /**
  * A declarative request for a side effect (ADR-0018 pillar 3). Reducers never
- * perform I/O; they return intents that a later milestone will commit to the log
- * and hand to a post-commit executor. Minimal for now — fleshed out later.
+ * perform I/O; they return intents that the host records into a deterministic
+ * outbox and a post-commit `EffectExecutor` runs at the edge. The replicated log
+ * thus IS a transactional outbox: the intent commits as part of the reducer's
+ * result, and the effect's outcome re-enters the log as a committed follow-up.
  */
 export interface EffectIntent {
     kind: string;
-    /** Stable key so the executor can run the effect exactly-once. */
+    /**
+     * Stable key that makes execution exactly-once: the outbox dedups on it (a
+     * replayed command never re-enqueues) and `applyEffectResult` is idempotent
+     * on it (a redelivered result never double-dispatches).
+     */
     idempotencyKey: string;
     payload: unknown;
+    /**
+     * Optional module command that consumes the effect's result. After the edge
+     * resolves the effect, `applyEffectResult` dispatches this command so the
+     * reducer can fold the outcome back into module state deterministically.
+     */
+    onResult?: { module: string; command: string };
 }
+
+/** Lifecycle of an outbox entry: enqueued (`pending`) or executed (`done`). */
+export type OutboxStatus = 'pending' | 'done';
+
+/**
+ * One slot in the deterministic outbox: the emitted intent, its execution
+ * status, and (once executed) the result the edge produced. Keyed in the outbox
+ * by `intent.idempotencyKey`.
+ */
+export interface OutboxEntry {
+    intent: EffectIntent;
+    status: OutboxStatus;
+    result?: unknown;
+}
+
+/**
+ * A committed log entry carrying an effect's outcome back into the deterministic
+ * core. The `result` was resolved ONCE on the effectful edge (the executor) and
+ * is now replicated verbatim; likewise the `seed` is resolved once on the edge by
+ * the executor, then committed verbatim so every replica applies the same value
+ * (convergence comes from committing the value, not from where it was generated).
+ * That deterministic `seed` gives any `onResult` reducer that consumes the result
+ * a deterministic `ctx`. Applying this entry on every replica yields identical
+ * state.
+ */
+export interface EffectResultEntry {
+    idempotencyKey: string;
+    result: unknown;
+    /**
+     * Resolved once on the edge by the executor, then committed verbatim so every
+     * replica applies the same value. It seeds the `ctx` of the `onResult`
+     * reducer, keeping that follow-up dispatch deterministic on every replica.
+     */
+    seed: Seed;
+}
+
+/**
+ * Performs the real side effect at the edge (ADR-0018 pillar 3). This is the ONE
+ * place non-determinism (network, clock, randomness) is allowed: the executor
+ * runs it post-commit, off the deterministic apply path, and bakes the returned
+ * value into an `EffectResultEntry` so replicas never re-run it.
+ */
+export type EffectHandler = (intent: EffectIntent) => Promise<unknown>;
 
 /**
  * The deterministic capabilities handed to a reducer. These are the ONLY
