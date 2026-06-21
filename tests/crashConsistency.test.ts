@@ -5,6 +5,8 @@ import {
     InstallSnapshotArgs,
     InstallSnapshotReply,
     PeerInfo,
+    ReadIndexArgs,
+    ReadIndexReply,
     RequestVoteArgs,
     RequestVoteReply,
     AppendEntriesArgs,
@@ -120,6 +122,9 @@ class CapturingTransport implements Transport {
     sendInstallSnapshot(p: PeerInfo, a: InstallSnapshotArgs): Promise<InstallSnapshotReply | null> {
         this.sent.push(a);
         return this.deliver(p.id, (h) => h.handleInstallSnapshot(a));
+    }
+    sendReadIndex(p: PeerInfo, a: ReadIndexArgs): Promise<ReadIndexReply | null> {
+        return this.deliver(p.id, (h) => Promise.resolve(h.handleReadIndex(a)));
     }
 }
 

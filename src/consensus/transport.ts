@@ -6,6 +6,8 @@ import {
     InstallSnapshotArgs,
     InstallSnapshotReply,
     PeerInfo,
+    ReadIndexArgs,
+    ReadIndexReply,
     RequestVoteArgs,
     RequestVoteReply,
 } from './types';
@@ -19,6 +21,7 @@ export interface Transport {
     sendRequestVote(peer: PeerInfo, args: RequestVoteArgs): Promise<RequestVoteReply | null>;
     sendAppendEntries(peer: PeerInfo, args: AppendEntriesArgs): Promise<AppendEntriesReply | null>;
     sendInstallSnapshot(peer: PeerInfo, args: InstallSnapshotArgs): Promise<InstallSnapshotReply | null>;
+    sendReadIndex(peer: PeerInfo, args: ReadIndexArgs): Promise<ReadIndexReply | null>;
 }
 
 /** What a node must expose so transports can deliver RPCs to it. */
@@ -26,6 +29,7 @@ export interface RpcHandler {
     handleRequestVote(args: RequestVoteArgs): RequestVoteReply;
     handleAppendEntries(args: AppendEntriesArgs): AppendEntriesReply;
     handleInstallSnapshot(args: InstallSnapshotArgs): InstallSnapshotReply;
+    handleReadIndex(args: ReadIndexArgs): ReadIndexReply | Promise<ReadIndexReply>;
 }
 
 /** Minimal JSON POST over Node's http module (no external deps). */
@@ -98,6 +102,16 @@ export class HttpTransport implements Transport {
             return null;
         }
     }
+
+    async sendReadIndex(peer: PeerInfo, args: ReadIndexArgs): Promise<ReadIndexReply | null> {
+        try {
+            // The leader runs a heartbeat-confirmation round before replying, so
+            // allow more time than a single heartbeat RPC.
+            return await postJson<ReadIndexReply>(`${peer.url}/raft/read-index`, args, this.rpcTimeoutMs * 5);
+        } catch {
+            return null;
+        }
+    }
 }
 
 /**
@@ -111,7 +125,7 @@ export class LocalTransport implements Transport {
         private readonly latencyMs = 1,
     ) {}
 
-    private async deliver<T>(peerId: string, fn: (h: RpcHandler) => T): Promise<T | null> {
+    private async deliver<T>(peerId: string, fn: (h: RpcHandler) => T | Promise<T>): Promise<T | null> {
         const handler = this.registry.get(peerId);
         if (!handler) return null; // peer is "down"
         await new Promise((r) => setTimeout(r, this.latencyMs));
@@ -128,5 +142,9 @@ export class LocalTransport implements Transport {
 
     sendInstallSnapshot(peer: PeerInfo, args: InstallSnapshotArgs): Promise<InstallSnapshotReply | null> {
         return this.deliver(peer.id, (h) => h.handleInstallSnapshot(args));
+    }
+
+    sendReadIndex(peer: PeerInfo, args: ReadIndexArgs): Promise<ReadIndexReply | null> {
+        return this.deliver(peer.id, (h) => h.handleReadIndex(args));
     }
 }

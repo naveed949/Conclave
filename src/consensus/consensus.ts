@@ -51,6 +51,17 @@ export interface Consensus<C extends AppCommand, T = unknown, A = unknown> {
     readBarrier(): Promise<void>;
 
     /**
+     * Linearizable read barrier that can be satisfied on ANY node (Raft §6.4
+     * follower read offloading). On the leader it is exactly {@link readBarrier};
+     * on a follower it obtains a confirmed ReadIndex from the leader and waits
+     * until this node has applied through it, so the caller may then serve the
+     * read from THIS node's local state. Rejects with `NotLeaderError` if no
+     * confirmed read index can be obtained (no leader / RPC fails / leader can't
+     * confirm a quorum), so the caller can forward the read like a write.
+     */
+    readBarrierLocal(): Promise<void>;
+
+    /**
      * Add or remove a single voting member (one change at a time). The returned
      * promise resolves once the change commits; leader-only.
      */

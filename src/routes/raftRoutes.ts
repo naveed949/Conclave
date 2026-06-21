@@ -31,6 +31,13 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
         res.json(node.handleInstallSnapshot(req.body));
     });
 
+    // ReadIndex (Raft §6.4): a follower asks the leader to confirm leadership and
+    // return a safe read index, so the follower can serve a linearizable read
+    // locally (follower read offloading) instead of forwarding the whole read.
+    router.post('/read-index', async (req, res) => {
+        res.json(await node.handleReadIndex(req.body));
+    });
+
     router.get('/status', (_req, res) => {
         res.json(node.status());
     });
