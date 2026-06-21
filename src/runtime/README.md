@@ -45,6 +45,7 @@ book demo.
 | `stateStore.ts` | `StateStore` interface + in-memory `MemoryStateStore` + copy-on-write `StoreView` (the seam for a persistent KV) | M8 |
 | `keyedModule.ts` | `defineKeyedModule` / `KeyedReducer` — record-addressed modules that touch only the keys they need | M8 |
 | `sandbox.ts` | `vm` determinism sandbox (enforce-by-removal) + leader-side step/CPU meter (`admit`) | M9 |
+| `shardRouter.ts` / `saga.ts` | Multi-Raft sharding: deterministic shard router over independent groups + cross-shard saga (try/compensate) | M10 |
 | `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle), `accounts` (keyed), `compute` (sandboxed) | M1–M2, M8–M9 |
 | `projections/` | Demo projection: `noteIndex` (notes indexed by actor) | M6 |
 

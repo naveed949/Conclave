@@ -218,10 +218,19 @@ the consensus core; M4–M7 wire it into real Raft and harden it.
   (deterministic); a leader-side `admit()` dry-runs with a `vm` wall-clock timeout
   to reject runaways before they enter the log (the gas/CFT model). Honestly
   scoped: `vm` is a determinism aid, not a security boundary.
+- **M10 — Multi-Raft sharding (pillar 4, write scaling; see ADR-0019).** Multiple
+  independent Raft groups (shards) with a deterministic `sha256(key) mod N` shard
+  router, so writes to different shards commit in parallel and state is
+  partitioned. Cross-shard transactions use a saga (try/compensate) — atomicity by
+  compensation, not isolation; a throwing compensation is surfaced
+  (`compensationFailures`), not hidden. Additive: each shard is an ordinary
+  single-group cluster, so the consensus core is untouched.
 
-**Remaining frontier (still deferred):** **multi-Raft sharding** with cross-shard
-sagas/2PC (the write-scaling half of pillars 4/6) — architecturally significant,
-tracked in its own ADR; and an optional **BFT consensus swap** (pillar 7) for
-multi-party trustlessness beyond the single trust domain — a protocol-level
-replacement well beyond a prototype increment, documented as a seam rather than
-built. These are the next increments of the roadmap above.
+**Remaining frontier:** an optional **BFT consensus swap** (pillar 7) for
+multi-party trustlessness beyond the single trust domain. This is a protocol-level
+replacement (different messages, `3f+1` quorums, signed votes) well beyond a
+prototype increment; **ADR-0020** records the honest design, the real seam (the
+commit-ordered-log contract above the log, not the Raft `Transport`), and why it
+is deliberately not built. Everything that ports unchanged under BFT — the
+deterministic state machine, Merkle audit, signing, and the core/edge split — is
+already in place, so a future BFT effort starts from a clean boundary.

@@ -32,6 +32,7 @@ supersedes the old one rather than editing history.
 | [0017](./0017-application-logic-as-smart-contracts.md) | Deploying application logic as smart contracts on this framework | Proposed |
 | [0018](./0018-native-backend-blockchain-benefits.md) | Bringing blockchain benefits to backend development natively | Proposed |
 | [0019](./0019-multi-raft-sharding.md) | Multi-Raft sharding for write scaling | Proposed |
+| [0020](./0020-pluggable-bft-consensus-seam.md) | Pluggable BFT consensus — the seam, and why it is not built | Proposed |
 
 ## Template
 
