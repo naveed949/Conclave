@@ -126,7 +126,13 @@ export interface AppendEntriesReply {
     conflictIndex?: number;
 }
 
-/** Sent by a leader to a follower that has fallen behind the leader's log snapshot. */
+/**
+ * Sent by a leader to a follower that has fallen behind the leader's log
+ * snapshot. Snapshots are streamed in bounded-size chunks (Raft figure 13): the
+ * leader serializes the snapshot's `data` to a JSON string once and ships
+ * successive slices. `lastIncludedIndex`/`lastIncludedTerm`/`members` ride every
+ * chunk (the follower uses them when the final chunk arrives).
+ */
 export interface InstallSnapshotArgs {
     term: number;
     leaderId: string;
@@ -134,8 +140,12 @@ export interface InstallSnapshotArgs {
     lastIncludedTerm: number;
     /** Cluster configuration as of the snapshot point (membership survives compaction). */
     members: PeerInfo[];
-    /** Serialized state-machine snapshot (opaque to the transport). */
-    data: unknown;
+    /** Code-unit (UTF-16) offset of this chunk within the serialized snapshot string. */
+    offset: number;
+    /** A slice of the JSON-serialized state-machine snapshot at `offset`. */
+    data: string;
+    /** True for the final chunk: the follower reassembles and installs on `done`. */
+    done: boolean;
 }
 
 export interface InstallSnapshotReply {
