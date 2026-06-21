@@ -70,6 +70,25 @@ export class MembershipError extends Error {
     }
 }
 
+/**
+ * A configuration as derived from a CONFIG log entry (or a snapshot base).
+ * `members` is C-new (the target voting set). When `oldMembers` is present the
+ * configuration is **joint** (C-old,new) and every decision needs a majority of
+ * BOTH sets separately (Raft §6 / ADR-0022).
+ */
+interface ConfigState {
+    members: PeerInfo[];
+    oldMembers?: PeerInfo[];
+}
+
+/** True iff `acks` contains a strict majority (floor(n/2)+1) of `config`. */
+function majorityOf(acks: Set<string>, config: Set<string>): boolean {
+    if (config.size === 0) return true; // an empty config imposes no constraint
+    let count = 0;
+    for (const id of config) if (acks.has(id)) count += 1;
+    return count >= Math.floor(config.size / 2) + 1;
+}
+
 interface PendingProposal<T> {
     term: number;
     resolve: (result: ApplyResult<T>) => void;
@@ -116,13 +135,31 @@ export class RaftNode<
     private lastIncludedIndex = 0;
     private lastIncludedTerm = 0;
 
-    // Cluster membership (Raft dissertation §4). The configuration lives in the
-    // log and takes effect the moment an entry is appended (not when committed).
-    // `members` is the current voting set (including self), derived from the log;
-    // `baseConfig` is the configuration as of the snapshot boundary, the base the
-    // log's CONFIG entries are layered on top of.
+    // Cluster membership (Raft §6, joint consensus; ADR-0022). The configuration
+    // lives in the log and takes effect the moment an entry is appended (not when
+    // committed). `members` is the current voting UNION (including self), derived
+    // from the log — during a joint transition that's C-old ∪ C-new, otherwise
+    // just C-new; it is the set of replication targets. The majority PREDICATE,
+    // however, is `inMajority`, which during a joint transition requires a majority
+    // of C-old AND of C-new separately (the two sets below). `baseConfig` is the
+    // configuration as of the snapshot boundary — the base the log's CONFIG entries
+    // are layered on top of; it may itself be joint if the snapshot boundary fell
+    // inside a transition.
     private members = new Map<string, PeerInfo>();
-    private baseConfig: PeerInfo[];
+    /** During a joint transition: the two voting sets whose majorities are BOTH required. */
+    private configOld: Set<string> | null = null;
+    private configNew = new Set<string>();
+    private baseConfig: ConfigState;
+    /**
+     * Set when this node becomes leader while the adopted config is already joint —
+     * i.e. it INHERITED an in-progress transition a previous leader appended but
+     * never finished. Such a leader must complete the transition (Raft §4.3) by
+     * appending the final C-new once the joint config commits (see `applyCommitted`),
+     * or the cluster stays wedged in joint consensus. A leader that ORIGINATES a
+     * change (via `changeMembership`) finalizes it itself, so this stays false for
+     * those — the two finalization paths are mutually exclusive.
+     */
+    private inheritedJoint = false;
     /** Wall-clock of the last AppendEntries/InstallSnapshot from a current leader. */
     private lastLeaderContact = 0;
 
@@ -182,40 +219,79 @@ export class RaftNode<
         this.snapshotChunkBytes = config.snapshotChunkBytes ?? 64 * 1024;
         this.app = config.stateMachine;
         this.rsm = new ReplicatedStateMachine<C, T>(this.app, config.dedupLimit);
-        // Bootstrap configuration: the peers from env plus this node itself.
-        this.baseConfig = [this.selfPeer, ...config.peers];
+        // Bootstrap configuration: the peers from env plus this node itself (a
+        // simple, non-joint config).
+        this.baseConfig = { members: [this.selfPeer, ...config.peers] };
         this.recomputeMembers();
     }
 
     // ---- cluster membership ----
 
-    /** Other voting members (the current configuration minus this node). */
+    /**
+     * Other voting members (the current voting UNION minus this node) — the set
+     * of replication targets. During a joint transition this is C-old ∪ C-new, so
+     * the leader replicates to (and confirms leadership against) every node in
+     * either configuration; the dual-majority predicate then decides separately.
+     */
     private otherMembers(): PeerInfo[] {
         return [...this.members.values()].filter((p) => p.id !== this.id);
     }
 
-    /** Votes/acks needed for a decision: a strict majority of the current config. */
-    private quorum(): number {
-        return Math.floor(this.members.size / 2) + 1;
+    /**
+     * Dual-majority predicate (Raft §6 / ADR-0022) — the single gate for EVERY
+     * quorum decision (election tally, commit advance, leadership confirmation):
+     *
+     *  - Simple config: `|ids ∩ C-new| >= maj(C-new)`.
+     *  - Joint config:  `|ids ∩ C-old| >= maj(C-old)` AND `|ids ∩ C-new| >= maj(C-new)`.
+     *
+     * During the joint phase this means no decision can be carried by a majority
+     * of only ONE configuration — the property that makes arbitrary membership
+     * changes safe (it is impossible for C-old and C-new to independently elect
+     * leaders or commit conflicting entries).
+     */
+    private inMajority(ids: Iterable<string>): boolean {
+        const set = ids instanceof Set ? ids : new Set(ids);
+        if (this.configOld && !majorityOf(set, this.configOld)) return false;
+        return majorityOf(set, this.configNew);
+    }
+
+    /** True iff the current configuration is the joint (transitional) C-old,new. */
+    private isJoint(): boolean {
+        return this.configOld !== null;
     }
 
     /** Configuration effective at `absIndex`: baseConfig + CONFIG entries up to it. */
-    private configAt(absIndex: number): PeerInfo[] {
+    private configAt(absIndex: number): ConfigState {
         let cfg = this.baseConfig;
         const upto = this.pos(Math.min(absIndex, this.lastLogIndex()));
         for (let p = 1; p <= upto; p++) {
             const cmd = this.log[p]?.command;
-            if (cmd && isConfigCommand(cmd)) cfg = cmd.members;
+            if (cmd && isConfigCommand(cmd)) cfg = { members: cmd.members, oldMembers: cmd.oldMembers };
         }
         return cfg;
     }
 
-    /** Recompute `members` from the latest configuration in the log. */
+    /**
+     * Recompute the derived configuration from the latest CONFIG entry in the log
+     * (over the snapshot base): the voting union `members` (replication targets)
+     * plus the two sets `configOld`/`configNew` the dual-majority predicate uses.
+     */
     private recomputeMembers(): void {
-        const cfg = this.configAt(this.lastLogIndex());
-        const next = new Map<string, PeerInfo>();
-        for (const p of cfg) next.set(p.id, p);
-        this.members = next;
+        this.adoptConfig(this.configAt(this.lastLogIndex()));
+    }
+
+    /** Adopt a (possibly joint) configuration as the current derived membership. */
+    private adoptConfig(cfg: ConfigState): void {
+        const union = new Map<string, PeerInfo>();
+        for (const p of cfg.members) union.set(p.id, p);
+        this.configNew = new Set(cfg.members.map((p) => p.id));
+        if (cfg.oldMembers) {
+            for (const p of cfg.oldMembers) union.set(p.id, p);
+            this.configOld = new Set(cfg.oldMembers.map((p) => p.id));
+        } else {
+            this.configOld = null;
+        }
+        this.members = union;
     }
 
     /** True if the log holds a not-yet-committed CONFIG entry (a change in flight). */
@@ -279,7 +355,8 @@ export class RaftNode<
             this.lastApplied = snap.lastIncludedIndex;
             this.log = [{ term: snap.lastIncludedTerm, command: { type: 'NOOP' } }];
             // The config compacted into the snapshot becomes the new base config.
-            if (snap.members) this.baseConfig = snap.members;
+            // Preserve a joint config if the snapshot boundary fell inside one.
+            if (snap.members) this.baseConfig = { members: snap.members, oldMembers: snap.oldMembers };
             this.logger?.info('restored snapshot', { lastIncludedIndex: this.lastIncludedIndex });
         }
 
@@ -423,51 +500,94 @@ export class RaftNode<
     }
 
     /**
-     * Add or remove a single voting member (Raft dissertation §4.1). Changing one
-     * server at a time keeps the old and new majorities overlapping, so no split
-     * decision is possible without a joint-consensus phase. The new configuration
-     * is appended as a CONFIG entry and adopted immediately; the returned promise
-     * resolves once that entry commits. Leader-only.
+     * Add or remove a voting member via **joint consensus** (Raft §6 / ADR-0022,
+     * superseding the single-server changes of ADR-0015). A change from C-old to
+     * C-new transitions through a joint configuration C-old,new in which every
+     * decision needs a majority of BOTH configurations separately — which makes
+     * even an arbitrary change (one that does NOT overlap C-old in a majority)
+     * safe. Two phases, each adopted on append and awaited to commit:
+     *
+     *   1. Append a JOINT CONFIG (`members: C-new, oldMembers: C-old`); await its
+     *      commit (dual majority).
+     *   2. Append a FINAL CONFIG (`members: C-new`); await its commit.
+     *
+     * The returned promise resolves when the FINAL config commits. A leader not in
+     * C-new steps down once the final config commits. Leader-only.
      */
-    changeMembership(change: { add?: PeerInfo; remove?: string }, meta?: CommandMeta): Promise<ApplyResult<T>> {
+    async changeMembership(change: { add?: PeerInfo; remove?: string }, meta?: CommandMeta): Promise<ApplyResult<T>> {
         if (this.role !== 'leader') throw new NotLeaderError(this.leaderId);
-        // One change at a time: refuse while a previous change is still uncommitted.
-        if (this.hasUncommittedConfig()) {
-            return Promise.reject(new MembershipError('A membership change is already in progress'));
+        // One transition at a time: refuse while a previous change is still in
+        // flight. That means both an uncommitted CONFIG entry AND a still-joint
+        // configuration (a committed joint awaiting its final C-new — e.g. one this
+        // leader inherited and is finalizing): starting a new change from either
+        // state would overlap two transitions and break the dual-majority argument.
+        if (this.hasUncommittedConfig() || this.isJoint()) {
+            throw new MembershipError('A membership change is already in progress');
         }
 
+        const oldMembers = [...this.members.values()];
         const next = new Map(this.members);
         if (change.add) {
             if (next.has(change.add.id)) {
-                return Promise.reject(new MembershipError(`${change.add.id} is already a member`));
+                throw new MembershipError(`${change.add.id} is already a member`);
             }
             next.set(change.add.id, change.add);
         } else if (change.remove) {
             if (!next.has(change.remove)) {
-                return Promise.reject(new MembershipError(`${change.remove} is not a member`));
+                throw new MembershipError(`${change.remove} is not a member`);
             }
             if (next.size === 1) {
-                return Promise.reject(new MembershipError('Cannot remove the last member'));
+                throw new MembershipError('Cannot remove the last member');
             }
             next.delete(change.remove);
         } else {
-            return Promise.reject(new MembershipError('Specify add or remove'));
+            throw new MembershipError('Specify add or remove');
+        }
+        const newMembers = [...next.values()];
+
+        // Phase 1: joint config C-old,new. Adopt on append, replicate, await commit
+        // under dual majority. (A leader crash here leaves the joint CONFIG in the
+        // log; the next leader adopts it on election and completes the transition —
+        // see `inheritedJoint` / the finalization in `applyCommitted`.)
+        const term = this.currentTerm;
+        await this.submitConfigEntry({ type: 'CONFIG', members: newMembers, oldMembers }, meta);
+
+        // We may have lost leadership (or moved terms) while awaiting the joint
+        // commit — don't append the final config from a stale leadership.
+        if (this.role !== 'leader' || this.currentTerm !== term) {
+            throw new NotLeaderError(this.leaderId);
         }
 
-        return this.submitConfig([...next.values()], meta);
+        // Phase 2: final simple config C-new. Adopt on append, replicate, await
+        // commit; the leader-self-removal step-down (if we're not in C-new) fires
+        // from applyCommitted once this commits.
+        return this.submitConfigEntry({ type: 'CONFIG', members: newMembers }, meta);
     }
 
-    /** Append a CONFIG entry, adopt it immediately, and replicate it. */
-    private submitConfig(members: PeerInfo[], meta?: CommandMeta): Promise<ApplyResult<T>> {
-        const entry: LogEntry<C> = { term: this.currentTerm, command: { type: 'CONFIG', members }, meta };
+    /** Append a CONFIG entry (joint or final), adopt it immediately, replicate it. */
+    private submitConfigEntry(
+        command: { type: 'CONFIG'; members: PeerInfo[]; oldMembers?: PeerInfo[] },
+        meta?: CommandMeta,
+    ): Promise<ApplyResult<T>> {
+        // A configuration's target set C-new must never be empty: an empty config
+        // makes its majority vacuously satisfiable (see `majorityOf`), which would
+        // silently drop the dual-majority requirement and let a single side decide.
+        if (command.members.length === 0) {
+            return Promise.reject(new MembershipError('a configuration must have at least one member'));
+        }
+        const entry: LogEntry<C> = { term: this.currentTerm, command, meta };
         this.log.push(entry);
-        // Adopt the new configuration the instant it is in the log (Raft §4.1).
+        // Adopt the new configuration the instant it is in the log (Raft §6).
         this.recomputeMembers();
         this.persist();
         const index = this.lastLogIndex();
         this.matchIndex.set(this.id, index);
         this.nextIndex.set(this.id, index + 1);
-        this.logger?.info('membership change proposed', { index, members: members.map((m) => m.id) });
+        this.logger?.info('membership change proposed', {
+            index,
+            members: command.members.map((m) => m.id),
+            joint: command.oldMembers !== undefined,
+        });
 
         const promise = new Promise<ApplyResult<T>>((resolve, reject) => {
             this.pending.set(index, { term: entry.term, resolve, reject });
@@ -585,13 +705,20 @@ export class RaftNode<
      * reports a log mismatch — the follower still recognises us as leader.
      */
     private async confirmLeadership(): Promise<boolean> {
-        const majority = this.quorum();
-        if (majority <= 1) return true; // single-node cluster is its own majority
+        // Single-node config (no peers in any voting set) is its own majority.
+        if (this.otherMembers().length === 0) return this.inMajority([this.id]);
         const term = this.currentTerm;
-        const acks = await Promise.all(this.otherMembers().map((peer) => this.replicateTo(peer)));
+        const peers = this.otherMembers();
+        const acks = await Promise.all(peers.map((peer) => this.replicateTo(peer)));
         if (this.role !== 'leader' || this.currentTerm !== term) return false;
-        const confirmed = 1 + acks.filter(Boolean).length; // +1 for self
-        return confirmed >= majority;
+        // Tally the set of ids that acknowledged our leadership (plus self), then
+        // require a DUAL majority during a joint transition (Raft §6 / ADR-0022):
+        // a single-config majority must never confirm a read on its own.
+        const confirmed = new Set<string>([this.id]);
+        peers.forEach((peer, i) => {
+            if (acks[i]) confirmed.add(peer.id);
+        });
+        return this.inMajority(confirmed);
     }
 
     private waitForApplied(index: number): Promise<void> {
@@ -675,6 +802,12 @@ export class RaftNode<
             this.matchIndex.set(peer.id, 0);
         }
         this.logger?.info('became LEADER', { term: this.currentTerm });
+        // If we inherited an in-progress joint configuration (a previous leader
+        // appended the joint C-old,new but crashed before installing the final
+        // C-new), remember to complete that transition once it commits (Raft §4.3;
+        // see `applyCommitted`). A leader that originates a change is NOT joint at
+        // election, so this is false for those.
+        this.inheritedJoint = this.isJoint();
         // Commit a no-op for this term so prior entries can be safely committed.
         this.log.push({ term: this.currentTerm, command: { type: 'NOOP' } });
         this.persist();
@@ -693,9 +826,11 @@ export class RaftNode<
             lastLogTerm: this.termAt(this.lastLogIndex())!,
         };
 
-        let votes = 1; // vote for self
-        const majority = this.quorum();
-        if (votes >= majority) {
+        // Tally granting voter ids (vote for self) and decide via the dual-majority
+        // predicate, so during a joint transition a candidate that can only reach a
+        // majority of ONE configuration can never win (Raft §6 / ADR-0022).
+        const votes = new Set<string>([this.id]);
+        if (this.inMajority(votes)) {
             this.becomeLeader();
             return;
         }
@@ -709,8 +844,8 @@ export class RaftNode<
                     return;
                 }
                 if (reply.voteGranted) {
-                    votes += 1;
-                    if (votes >= majority && this.role === 'candidate') {
+                    votes.add(peer.id);
+                    if (this.role === 'candidate' && this.inMajority(votes)) {
                         this.becomeLeader();
                     }
                 }
@@ -834,7 +969,16 @@ export class RaftNode<
         const durable = this.storage.loadSnapshot();
         const snapIndex = durable?.lastIncludedIndex ?? this.lastIncludedIndex;
         const lastIncludedTerm = durable?.lastIncludedTerm ?? this.lastIncludedTerm;
-        const members = durable?.members ?? this.configAt(snapIndex);
+        // The config at the snapshot point — may be joint; carry both sets so the
+        // follower reconstructs the joint config and keeps enforcing dual majority.
+        // Prefer the durable snapshot's config; fall back to the live config at the
+        // snapshot point rather than an empty set (an empty config a follower adopted
+        // as its base would be constraint-free — see `majorityOf`).
+        const cfg: ConfigState = durable && durable.members
+            ? { members: durable.members, oldMembers: durable.oldMembers }
+            : this.configAt(snapIndex);
+        const members = cfg.members;
+        const oldMembers = cfg.oldMembers;
         const data = durable?.data ?? this.rsm.snapshot();
 
         // Serialize the snapshot's data ONCE, then stream byte/character slices.
@@ -865,6 +1009,7 @@ export class RaftNode<
                     lastIncludedIndex: snapIndex,
                     lastIncludedTerm,
                     members,
+                    oldMembers,
                     offset,
                     data: slice,
                     done,
@@ -1041,8 +1186,9 @@ export class RaftNode<
         // commitIndex/lastApplied only move forward (guarded above against rollback).
         this.commitIndex = Math.max(this.commitIndex, args.lastIncludedIndex);
         this.lastApplied = Math.max(this.lastApplied, args.lastIncludedIndex);
-        // Adopt the configuration carried with the snapshot as the new base config.
-        if (args.members) this.baseConfig = args.members;
+        // Adopt the configuration carried with the snapshot as the new base config,
+        // preserving a joint config if the snapshot boundary fell inside one.
+        if (args.members) this.baseConfig = { members: args.members, oldMembers: args.oldMembers };
         this.recomputeMembers();
 
         // Persist snapshot before the compacted log (same crash-ordering as takeSnapshot).
@@ -1050,6 +1196,7 @@ export class RaftNode<
             lastIncludedIndex: this.lastIncludedIndex,
             lastIncludedTerm: this.lastIncludedTerm,
             members: args.members,
+            oldMembers: args.oldMembers,
             data: snapshotData,
         });
         this.persist();
@@ -1062,12 +1209,15 @@ export class RaftNode<
         for (let n = this.lastLogIndex(); n > this.commitIndex; n--) {
             // Raft safety: only commit entries from the current term by counting.
             if (this.termAt(n) !== this.currentTerm) continue;
-            // Count only current voting members (a removed node mustn't count).
-            let count = 0;
+            // The set of voting members (incl. self) that have replicated through n.
+            // An index is committed iff that set forms a DUAL majority during a joint
+            // transition (Raft §6 / ADR-0022) — i.e. it never commits on a single
+            // configuration's majority alone.
+            const acked = new Set<string>();
             for (const id of this.members.keys()) {
-                if ((this.matchIndex.get(id) ?? 0) >= n) count += 1;
+                if ((this.matchIndex.get(id) ?? 0) >= n) acked.add(id);
             }
-            if (count >= this.quorum()) {
+            if (this.inMajority(acked)) {
                 this.commitIndex = n;
                 this.applyCommitted();
                 break;
@@ -1090,6 +1240,21 @@ export class RaftNode<
             }
         }
         this.resolveReadWaiters();
+        // Complete an INHERITED joint transition (Raft §4.3): a previous leader
+        // appended the joint C-old,new but crashed before installing the final
+        // C-new. Once we (the new leader) have COMMITTED that joint config (it is
+        // joint and no CONFIG entry is still uncommitted), append the final C-new so
+        // the cluster doesn't stay wedged in joint consensus. `changeMembership`
+        // finalizes the transitions it originates itself, so `inheritedJoint` gates
+        // this to inherited ones only and is cleared so it fires at most once.
+        if (this.role === 'leader' && this.inheritedJoint && this.isJoint() && !this.hasUncommittedConfig()) {
+            this.inheritedJoint = false;
+            const cNew = [...this.configNew]
+                .map((id) => this.members.get(id))
+                .filter((p): p is PeerInfo => p !== undefined);
+            this.logger?.info('completing inherited joint transition', { members: cNew.map((m) => m.id) });
+            void this.submitConfigEntry({ type: 'CONFIG', members: cNew }).catch(() => undefined);
+        }
         // If a committed config removed us, step down: we are no longer a member.
         if (this.role === 'leader' && !this.members.has(this.id)) {
             this.logger?.info('stepping down: removed from cluster configuration');
@@ -1112,8 +1277,10 @@ export class RaftNode<
         const snapTerm = this.termAt(snapIndex)!;
         const data = this.rsm.snapshot();
         // Capture the configuration at the snapshot point before compacting — the
-        // CONFIG entries that produced it are about to be discarded.
-        const members = this.configAt(snapIndex);
+        // CONFIG entries that produced it are about to be discarded. This may be a
+        // JOINT config (the snapshot boundary fell inside a transition): preserve
+        // both sets so the compacted base still enforces dual majority (ADR-0022).
+        const cfg = this.configAt(snapIndex);
 
         // Keep the sentinel + everything after the snapshot point.
         const tail = this.log.slice(this.pos(snapIndex) + 1);
@@ -1122,12 +1289,18 @@ export class RaftNode<
         // compacted log. That way the durable log base can only ever lag the
         // snapshot (reconciled on restart), never lead it (which would lose the
         // state the discarded entries produced).
-        this.storage.saveSnapshot({ lastIncludedIndex: snapIndex, lastIncludedTerm: snapTerm, members, data });
+        this.storage.saveSnapshot({
+            lastIncludedIndex: snapIndex,
+            lastIncludedTerm: snapTerm,
+            members: cfg.members,
+            oldMembers: cfg.oldMembers,
+            data,
+        });
 
         this.log = [{ term: snapTerm, command: { type: 'NOOP' } }, ...tail];
         this.lastIncludedIndex = snapIndex;
         this.lastIncludedTerm = snapTerm;
-        this.baseConfig = members;
+        this.baseConfig = cfg;
         this.persist();
         this.logger?.info('took snapshot', { lastIncludedIndex: snapIndex, remainingEntries: this.log.length - 1 });
     }

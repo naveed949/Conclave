@@ -67,10 +67,18 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
   eventually consistent by default. `?consistency=strong` reads go through the
   leader's ReadIndex barrier (`node.readBarrier()`) and must never be served from
   a node that can't confirm leadership — fail closed (`NotLeaderError`) instead.
-- **Membership: one change at a time (ADR-0015).** A `CONFIG` entry takes effect
-  on *append*, not commit; never apply two overlapping changes (the code refuses
-  a second while one is uncommitted). Membership must be derived from the log so
-  every replica agrees — don't track it out of band.
+- **Membership: joint consensus, one transition at a time (ADR-0022, supersedes
+  ADR-0015).** A change C-old→C-new goes through a **joint** `CONFIG` (`members`=
+  C-new, `oldMembers`=C-old) then a **final** `CONFIG` (`members`=C-new). A `CONFIG`
+  entry takes effect on *append*, not commit. During the joint phase EVERY quorum
+  decision (election, commit, leadership confirmation) needs a **dual majority** —
+  a majority of BOTH C-old and C-new separately; route every decision through
+  `inMajority()`, never a single count. Replicate to the voting **union**
+  (`members` / `otherMembers()`). Never start a second change while one is in
+  flight (the code refuses while a `CONFIG` is uncommitted *or* the config is still
+  joint). Membership must be derived from the log so every replica agrees — don't
+  track it out of band. A new leader that inherits an uncompleted joint config must
+  finish the transition (`inheritedJoint` → finalize in `applyCommitted`).
 
 ## Conventions
 

@@ -27,13 +27,14 @@ supersedes the old one rather than editing history.
 | [0012](./0012-platform-layer.md) | A reusable platform layer for cross-cutting concerns | Accepted |
 | [0013](./0013-minimal-dependencies.md) | Minimal external dependencies (implement primitives in-house) | Accepted |
 | [0014](./0014-opt-in-linearizable-reads.md) | Opt-in linearizable reads via ReadIndex | Accepted |
-| [0015](./0015-dynamic-cluster-membership.md) | Dynamic cluster membership via single-server changes | Accepted |
+| [0015](./0015-dynamic-cluster-membership.md) | Dynamic cluster membership via single-server changes | Superseded by ADR-0022 |
 | [0016](./0016-crash-consistent-snapshot-persistence.md) | Crash-consistent snapshot/log persistence and snapshot transfer | Accepted |
 | [0017](./0017-generic-pluggable-state-machine.md) | Generic pluggable state machine (framework core) | Accepted |
 | [0018](./0018-application-logic-as-smart-contracts.md) | Deploying application logic as smart contracts on this framework | Proposed |
 | [0019](./0019-native-backend-blockchain-benefits.md) | Bringing blockchain benefits to backend development natively | Proposed |
 | [0020](./0020-multi-raft-sharding.md) | Multi-Raft sharding for write scaling | Proposed |
 | [0021](./0021-pluggable-bft-consensus-seam.md) | Pluggable BFT consensus — the seam, and why it is not built | Proposed |
+| [0022](./0022-joint-consensus-membership.md) | Dynamic cluster membership via joint consensus | Accepted |
 
 ## Template
 
