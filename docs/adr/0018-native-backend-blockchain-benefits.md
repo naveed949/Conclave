@@ -159,3 +159,35 @@ preserving a backend principle.
 - **Make backends pure instead of splitting core/edge.** Rejected outright:
   forbidding external I/O contradicts the fundamental nature of backend systems;
   the core/edge split is precisely what avoids that compromise.
+
+## Prototype status (2026-06-20)
+
+A working prototype of the deterministic-core pillars lives under `src/runtime/`
+(see [`src/runtime/README.md`](../../src/runtime/README.md)). It is layered on
+top of the existing consensus core without modifying it, and was built in three
+reviewed milestones:
+
+- **M1 — Module SDK + deterministic runtime (pillars 1–2).** `defineModule`, a
+  `ModuleHost` that dispatches commands to pure reducers, and a deterministic
+  `ReducerContext` (`now`/`random`/`id`) derived entirely from a leader-resolved
+  `Seed`. A convergence test proves two independent hosts fed the same seeded
+  command stream reach byte-identical state.
+- **M2 — Committed-intent effects + outbox executor (pillar 3).** Reducers emit
+  declarative `EffectIntent`s into a deterministic outbox; a post-commit
+  `EffectExecutor` runs each effect and feeds the result back as a committed
+  `EffectResultEntry`. Exactly-once at the state level is enforced by outbox
+  dedup + idempotent result application + an in-flight guard; handler execution
+  is honestly at-least-once.
+- **M3 — Merkle audit + committed code version (pillar 5).** A Merkle
+  accumulator with O(log n) inclusion proofs and a domain-separated root, plus a
+  per-command module code-version hash so the audit proves which logic version
+  produced each result.
+
+**Deferred (not in the prototype):** consensus wiring of a generic module command
+into `RaftNode` (the runtime is exercised via deterministic replay, which proves
+the replicated-state-machine property without touching the core); pluggable
+state-store backend and CQRS read projections (pillar 4); multi-Raft sharding and
+the step-budget "gas" guard (pillars 4, 6); signed commands and an optional BFT
+swap (pillar 7); and a `vm`-level determinism sandbox (the prototype relies on
+`ctx` injection plus the determinism convergence tests). These remain the natural
+next increments of the roadmap above.
