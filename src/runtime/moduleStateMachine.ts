@@ -1,3 +1,4 @@
+import { RaftNode } from '../consensus/raftNode';
 import { StateMachine } from '../consensus/stateMachine';
 import { ApplyResult } from '../consensus/types';
 import { ModuleHost } from './moduleHost';
@@ -57,3 +58,12 @@ export class ModuleStateMachine implements StateMachine<ModuleAppCommand, unknow
         this.host.restore(data as Record<string, unknown>);
     }
 }
+
+/**
+ * A Raft node whose application is the {@link ModuleStateMachine} runtime — the
+ * concrete node type the generic module HTTP adapter wires (the runtime analog of
+ * `BookNode` in `models/bookStateMachine.ts`). `node.app` is the
+ * `ModuleStateMachine`, so `node.app.host` is the live {@link ModuleHost} the
+ * controller reads queries/state from.
+ */
+export type ModuleNode = RaftNode<ModuleAppCommand, unknown, ModuleStateMachine>;
