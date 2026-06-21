@@ -1,0 +1,18 @@
+# Scrape the three book-service nodes' /metrics endpoints. Each node exposes
+# Prometheus text (raft + HTTP signals) at /metrics. Every series already carries
+# a `node="<id>"` label (set by the app's metrics layer), so we DON'T add a target
+# label of the same name — that would collide and Prometheus would rename ours to
+# `exported_node`. Dashboards break series down by the app's `node` label.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: raft-cluster
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "node1:3001"
+          - "node2:3002"
+          - "node3:3003"
