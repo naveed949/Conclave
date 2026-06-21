@@ -28,14 +28,19 @@ export interface AppCommand {
  *
  * - `NOOP`   — internal Raft bookkeeping (e.g. the no-op a new leader commits to
  *              make prior-term entries safely committable). Never audited.
- * - `CONFIG` — a cluster membership change (Raft dissertation §4). Consumed by
- *              the Raft node, which adopts `members` as its configuration the
+ * - `CONFIG` — a cluster membership change (Raft §6, joint consensus; ADR-0022).
+ *              Consumed by the Raft node, which adopts the configuration the
  *              moment the entry is appended (not when committed). A no-op for the
- *              application state machine. `members` is the full new voting set.
+ *              application state machine. `members` is the new voting set (C-new).
+ *              When `oldMembers` is present the entry is the **joint** config
+ *              C-old,new — a transitional configuration in which EVERY decision
+ *              (election, commit, leadership confirmation) needs a majority of
+ *              BOTH `oldMembers` (C-old) AND `members` (C-new) separately. When
+ *              `oldMembers` is absent the entry is a **final** simple config.
  */
 export type Command<C extends AppCommand = AppCommand> =
     | { type: 'NOOP' }
-    | { type: 'CONFIG'; members: PeerInfo[] }
+    | { type: 'CONFIG'; members: PeerInfo[]; oldMembers?: PeerInfo[] }
     | C;
 
 /** A single entry in the replicated log. */
@@ -140,6 +145,13 @@ export interface InstallSnapshotArgs {
     lastIncludedTerm: number;
     /** Cluster configuration as of the snapshot point (membership survives compaction). */
     members: PeerInfo[];
+    /**
+     * Present iff the snapshot boundary fell inside a joint-consensus transition
+     * (ADR-0022): the C-old set of the joint config (`members` is then C-new), so
+     * the receiving follower reconstructs the joint config and keeps enforcing
+     * dual majority rather than silently collapsing to a simple config.
+     */
+    oldMembers?: PeerInfo[];
     /** Code-unit (UTF-16) offset of this chunk within the serialized snapshot string. */
     offset: number;
     /** A slice of the JSON-serialized state-machine snapshot at `offset`. */
@@ -183,6 +195,13 @@ export interface Snapshot {
     lastIncludedTerm: number;
     /** Cluster configuration as of the snapshot point (the compacted log's base config). */
     members?: PeerInfo[];
+    /**
+     * Present iff the snapshot boundary fell inside a joint-consensus transition
+     * (ADR-0022): the C-old set of the joint config. `members` is then C-new.
+     * Preserving it ensures a node restoring/catching-up from this snapshot still
+     * enforces dual majority and doesn't lose an in-progress joint config.
+     */
+    oldMembers?: PeerInfo[];
     data: unknown;
 }
 
@@ -193,11 +212,11 @@ export interface PeerInfo {
 }
 
 /** True for the framework's reserved control commands (never application commands). */
-export function isControlCommand(command: { type: string }): command is { type: 'NOOP' } | { type: 'CONFIG'; members: PeerInfo[] } {
+export function isControlCommand(command: { type: string }): command is { type: 'NOOP' } | { type: 'CONFIG'; members: PeerInfo[]; oldMembers?: PeerInfo[] } {
     return command.type === 'NOOP' || command.type === 'CONFIG';
 }
 
 /** Narrow a log command to a CONFIG membership entry. */
-export function isConfigCommand(command: { type: string }): command is { type: 'CONFIG'; members: PeerInfo[] } {
+export function isConfigCommand(command: { type: string }): command is { type: 'CONFIG'; members: PeerInfo[]; oldMembers?: PeerInfo[] } {
     return command.type === 'CONFIG';
 }
