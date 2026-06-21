@@ -1,6 +1,6 @@
 import { resolveSeed } from './context';
 import { signCommand } from './signing';
-import { ModuleAppCommand } from './types';
+import { EffectResultEntry, ModuleEffectResultCommand, ModuleInvokeCommand } from './types';
 
 /**
  * LEADER-SIDE builder for a module application command (ADR-0019). This is where
@@ -24,7 +24,7 @@ export function buildModuleCommand(
     command: string,
     input: unknown,
     meta: { actor: string; requestId: string },
-): ModuleAppCommand {
+): ModuleInvokeCommand {
     return {
         type: 'MODULE',
         module,
@@ -54,7 +54,7 @@ export function buildSignedModuleCommand(
     command: string,
     input: unknown,
     opts: { actor: string; requestId: string; privateKeyPem: string },
-): ModuleAppCommand {
+): ModuleInvokeCommand {
     const sig = signCommand(opts.privateKeyPem, {
         module,
         command,
@@ -71,5 +71,28 @@ export function buildSignedModuleCommand(
         actor: opts.actor,
         requestId: opts.requestId,
         sig,
+    };
+}
+
+/**
+ * Build the committed effect-result command (M12). The leader's `EffectDriver`
+ * calls this after a handler resolves a pending effect, so the resolved
+ * {@link EffectResultEntry} replicates and routes to `ModuleHost.applyEffectResult`
+ * on every node.
+ *
+ * The actor is the system identity `'system'` (no human originated this — the
+ * runtime did) and the `requestId` is STABLE, derived from the entry's
+ * idempotency key (`effect:${entry.idempotencyKey}`). That stable id means the
+ * SUBSTRATE's dedup cache treats a re-submitted result for the same effect as a
+ * replay (returns the cached apply result without re-routing), layering on top of
+ * `applyEffectResult` itself being idempotent. The entry already carries its own
+ * leader/edge-resolved `seed`; this does NOT re-resolve one.
+ */
+export function buildEffectResultCommand(entry: EffectResultEntry): ModuleEffectResultCommand {
+    return {
+        type: 'MODULE_EFFECT_RESULT',
+        entry,
+        actor: 'system',
+        requestId: `effect:${entry.idempotencyKey}`,
     };
 }

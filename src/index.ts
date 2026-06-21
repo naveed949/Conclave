@@ -8,6 +8,9 @@
 // Consensus core
 export { RaftNode, NotLeaderError, MembershipError } from './consensus/raftNode';
 export type { RaftConfig } from './consensus/raftNode';
+// The ordering/commit seam above the log (ADR-0021): the application-facing
+// contract `RaftNode` implements and a future BFT engine would implement instead.
+export type { Consensus, ConsensusOf } from './consensus/consensus';
 export type { StateMachine } from './consensus/stateMachine';
 export { ReplicatedStateMachine, DEFAULT_DEDUP_LIMIT } from './consensus/replicatedStateMachine';
 export type { RsmSnapshot } from './consensus/replicatedStateMachine';
@@ -54,6 +57,9 @@ export type { KeyedModuleDefinition, KeyedReducer } from './runtime/keyedModule'
 export { buildModuleCommand, buildSignedModuleCommand } from './runtime/command';
 export { resolveSeed, createContext } from './runtime/context';
 export { EffectExecutor } from './runtime/effectExecutor';
+// The live, in-cluster counterpart of `EffectExecutor` (M12): the leadership-aware
+// driver that drains the outbox post-commit and rides results back through the log.
+export { EffectDriver } from './runtime/effectDriver';
 export { defineProjection } from './runtime/projection';
 export { ProjectionHost } from './runtime/projectionHost';
 export { MemoryStateStore, StoreView } from './runtime/stateStore';
@@ -64,6 +70,8 @@ export { runSaga } from './runtime/saga';
 export type {
     ModuleDefinition,
     ModuleAppCommand,
+    ModuleInvokeCommand,
+    ModuleEffectResultCommand,
     ModuleCommand,
     ModuleApplyResult,
     Reducer,

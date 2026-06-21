@@ -14,6 +14,7 @@ export interface NodeEnvOptions {
     electionMaxMs?: number;
     heartbeatMs?: number;
     snapshotThreshold?: number;
+    snapshotChunkBytes?: number;
     dedupLimit?: number;
 }
 
@@ -50,6 +51,7 @@ export function loadRaftConfig(env: NodeJS.ProcessEnv = process.env): NodeEnvOpt
         electionMaxMs: env.ELECTION_MAX_MS ? Number(env.ELECTION_MAX_MS) : undefined,
         heartbeatMs: env.HEARTBEAT_MS ? Number(env.HEARTBEAT_MS) : undefined,
         snapshotThreshold: env.SNAPSHOT_THRESHOLD ? Number(env.SNAPSHOT_THRESHOLD) : undefined,
+        snapshotChunkBytes: env.SNAPSHOT_CHUNK_BYTES ? Number(env.SNAPSHOT_CHUNK_BYTES) : undefined,
         dedupLimit: env.DEDUP_LIMIT ? Number(env.DEDUP_LIMIT) : undefined,
     };
 }

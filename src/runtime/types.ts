@@ -194,7 +194,7 @@ export interface ModuleCommand {
 }
 
 /**
- * The application command the module runtime puts on the replicated log
+ * The INVOKE application command the module runtime puts on the replicated log
  * (ADR-0019 M4). It satisfies the framework's `AppCommand` contract (a string
  * `type` discriminator — `'MODULE'`, distinct from the reserved `NOOP`/`CONFIG`)
  * and additionally carries the `actor`/`requestId` so the `StateMachine` adapter,
@@ -202,11 +202,42 @@ export interface ModuleCommand {
  * `(cmd, meta)` call the `ModuleHost` expects and verify the signature. These two
  * fields MUST match the `CommandMeta` the command is submitted with.
  */
-export interface ModuleAppCommand extends ModuleCommand {
+export interface ModuleInvokeCommand extends ModuleCommand {
     type: 'MODULE';
     actor: string;
     requestId: string;
 }
+
+/**
+ * The EFFECT-RESULT application command (M12, the committed-intent effect loop).
+ * After the leader's `EffectDriver` runs a pending effect's handler at the edge,
+ * it submits this command so the resolved {@link EffectResultEntry} rides the
+ * replicated log and is routed to `ModuleHost.applyEffectResult` on EVERY node —
+ * closing the transactional-outbox loop without a bespoke consensus-core hook.
+ *
+ * `'MODULE_EFFECT_RESULT'` is an ordinary application `type` (NOT the reserved
+ * `NOOP`/`CONFIG`). It carries `actor`/`requestId` for the same reason
+ * {@link ModuleInvokeCommand} does — the `StateMachine` adapter gets no separate
+ * meta — and these MUST match the `CommandMeta` the command is submitted with.
+ * The driver uses a stable `requestId` derived from `entry.idempotencyKey` so the
+ * substrate's own dedup ALSO guards against a re-submitted result, on top of
+ * `applyEffectResult` being idempotent.
+ */
+export interface ModuleEffectResultCommand {
+    type: 'MODULE_EFFECT_RESULT';
+    entry: EffectResultEntry;
+    actor: string;
+    requestId: string;
+}
+
+/**
+ * The application command union the module runtime puts on the replicated log:
+ * a caller {@link ModuleInvokeCommand} (`'MODULE'`) or a committed-effect-result
+ * {@link ModuleEffectResultCommand} (`'MODULE_EFFECT_RESULT'`). Both satisfy the
+ * framework's `AppCommand` contract (a string `type` discriminator) and the
+ * `ModuleStateMachine` adapter routes on `type`.
+ */
+export type ModuleAppCommand = ModuleInvokeCommand | ModuleEffectResultCommand;
 
 /** The outcome of applying a `ModuleCommand` to a `ModuleHost`. */
 export interface ModuleApplyResult {

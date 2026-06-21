@@ -1,9 +1,11 @@
 import { Request, Response } from 'express';
+import { Consensus } from '../consensus/consensus';
 import { NotLeaderError } from '../consensus/raftNode';
 import { CommandMeta } from '../consensus/types';
 import { getContext } from '../platform/requestContext';
 import { forwardToLeader, isForwarded } from '../platform/forward';
 import {
+    Book,
     BookCommand,
     buildAddCommand,
     buildBorrowCommand,
@@ -11,7 +13,10 @@ import {
     buildReturnCommand,
     buildUpdateCommand,
 } from '../models/book';
-import { BookNode } from '../models/bookStateMachine';
+import { BookStateMachine } from '../models/bookStateMachine';
+
+/** The consensus seam this controller depends on, specialized to the book app. */
+type BookConsensus = Consensus<BookCommand, Book, BookStateMachine>;
 
 /** A linearizable read is requested via `?consistency=strong` or `X-Consistency: strong`. */
 function wantsStrongRead(req: Request): boolean {
@@ -26,7 +31,7 @@ function wantsStrongRead(req: Request): boolean {
  * via the leader; a follower transparently forwards writes (and strong reads)
  * to the leader (falling back to 421 if the leader is unknown/unreachable).
  */
-export function createBookController(node: BookNode) {
+export function createBookController(node: BookConsensus) {
     // Forward to the leader (or reply 421) when this node isn't the leader.
     const onNotLeader = async (req: Request, res: Response, err: NotLeaderError): Promise<void> => {
         const leaderUrl = node.getLeaderUrl();
@@ -53,10 +58,13 @@ export function createBookController(node: BookNode) {
         }
     };
 
-    // Run `serve` only after the leader's linearizable read barrier resolves.
+    // Run `serve` only after the linearizable read barrier resolves. On a
+    // follower this obtains a ReadIndex from the leader and applies through it,
+    // then serves LOCALLY (no forwarding); only if no confirmed read index can be
+    // obtained does it fall back to forwarding/421 (fail closed — never stale).
     const strongRead = async (req: Request, res: Response, serve: () => void): Promise<void> => {
         try {
-            await node.readBarrier();
+            await node.readBarrierLocal();
             serve();
         } catch (err) {
             if (err instanceof NotLeaderError) return onNotLeader(req, res, err);

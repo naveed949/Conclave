@@ -1,6 +1,6 @@
 # 0015. Dynamic cluster membership via single-server changes
 
-- Status: Accepted
+- Status: Superseded by [ADR-0022](./0022-joint-consensus-membership.md)
 - Date: 2026-06-19
 
 ## Context
