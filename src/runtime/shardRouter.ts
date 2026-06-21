@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { AppCommand, ApplyResult, CommandMeta } from '../consensus/types';
+import { MetricsRegistry } from '../platform/metrics';
 
 /**
  * The minimal node surface the router needs: ask who leads, and submit to it.
@@ -113,5 +114,18 @@ export class ShardRouter<C extends AppCommand = AppCommand, T = unknown> {
             return Promise.reject(new NoShardLeaderError(shard));
         }
         return leader.submit(command, meta);
+    }
+
+    /**
+     * Push scrape-time shard gauges into `metrics` (Milestone 15) — the sharding
+     * analog of `RaftNode.collectMetrics()`. Sets `shard_count` and, per shard,
+     * `shard_has_leader{shard}` = 1 when a leader is currently known, else 0. Read
+     * only (derived live from each group's leadership, the router caches nothing).
+     */
+    collectMetrics(metrics: MetricsRegistry): void {
+        metrics.shardCount.set(this.shards.length);
+        for (let i = 0; i < this.shards.length; i++) {
+            metrics.shardHasLeader.set(this.leaderOf(i) ? 1 : 0, { shard: i });
+        }
     }
 }

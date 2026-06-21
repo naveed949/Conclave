@@ -25,7 +25,7 @@ const storage = new FileStorage(config.id, process.env.DATA_DIR || './data');
 // wiring `BookStateMachine`). Register a demo module set; because modules are
 // registered identically on every node BEFORE start, MODULE commands apply
 // deterministically and the cluster converges.
-const stateMachine = new ModuleStateMachine();
+const stateMachine = new ModuleStateMachine(undefined, metrics);
 // A `Reducer<S>` is INVARIANT in its state type `S` (it both consumes and
 // produces `S`), so a strongly-typed `ModuleDefinition<CounterState>` is not
 // assignable to the host's erased `ModuleDefinition<unknown>` slot — even though
@@ -45,8 +45,9 @@ const node: ModuleNode = new RaftNode(
     new HttpTransport(),
 );
 
-// Refresh Raft gauges whenever /metrics is scraped.
+// Refresh Raft + module-runtime gauges whenever /metrics is scraped (M15).
 metrics.registerCollector(() => node.collectMetrics());
+metrics.registerCollector(() => stateMachine.collectMetrics(metrics));
 
 const app = createModuleApp(node, { logger, metrics });
 const PORT = getPort();
@@ -62,7 +63,7 @@ const effectHandlers: Record<string, EffectHandler> = {
         return { orderId, ok: true };
     },
 };
-const effectDriver = new EffectDriver(node, effectHandlers);
+const effectDriver = new EffectDriver(node, effectHandlers, { metrics });
 
 const server = app.listen(PORT, () => {
     logger.info('module node started', { node: config.id, port: PORT, peers: config.peers.length });

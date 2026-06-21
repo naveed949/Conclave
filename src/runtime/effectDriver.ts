@@ -1,6 +1,7 @@
 import { CommandMeta } from '../consensus/types';
 import { NotLeaderError } from '../consensus/raftNode';
 import { ConsensusOf } from '../consensus/consensus';
+import { MetricsRegistry } from '../platform/metrics';
 import { buildEffectResultCommand } from './command';
 import { EffectExecutor } from './effectExecutor';
 import { ModuleStateMachine } from './moduleStateMachine';
@@ -47,7 +48,7 @@ export class EffectDriver {
         // `Consensus` drives effects unchanged.
         private readonly node: ConsensusOf<ModuleAppCommand, unknown, ModuleStateMachine>,
         handlers: Record<string, EffectHandler>,
-        opts: { intervalMs?: number } = {},
+        opts: { intervalMs?: number; metrics?: MetricsRegistry } = {},
     ) {
         this.intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
         // The executor's `submit` rides the resolved result back through the log.
@@ -67,7 +68,7 @@ export class EffectDriver {
                 if (err instanceof NotLeaderError) return;
                 throw err;
             }
-        });
+        }, opts.metrics);
     }
 
     /**
