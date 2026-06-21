@@ -42,7 +42,9 @@ book demo.
 | `command.ts` | Leader-side `buildModuleCommand` / `buildSignedModuleCommand` (resolve seed, optionally sign) | M4, M7 |
 | `signing.ts` | ed25519 sign/verify over the logical payload + `KeyRegistry` (actor→authorized key) | M7 |
 | `projection.ts` / `projectionHost.ts` | CQRS read side: derived, rebuildable read model off the apply path | M6 |
-| `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle) | M1–M2 |
+| `stateStore.ts` | `StateStore` interface + in-memory `MemoryStateStore` + copy-on-write `StoreView` (the seam for a persistent KV) | M8 |
+| `keyedModule.ts` | `defineKeyedModule` / `KeyedReducer` — record-addressed modules that touch only the keys they need | M8 |
+| `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle), `accounts` (keyed) | M1–M2, M8 |
 | `projections/` | Demo projection: `noteIndex` (notes indexed by actor) | M6 |
 
 The runtime rides **real consensus** (M4): a generic `MODULE` command in

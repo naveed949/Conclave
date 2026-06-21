@@ -201,12 +201,19 @@ the consensus core; M4–M7 wire it into real Raft and harden it.
   originating actor over the *logical* payload (not the leader's seed); every node
   verifies on the apply path against an actor→key registry, so a forged `actor` is
   rejected `401` identically on all nodes. Opt-in and fully backward-compatible.
+- **M8 — Pluggable key-oriented state store (pillar 4, state > RAM).** A
+  `StateStore` abstraction (in-memory default; the seam a persistent embedded
+  KV/LSM drops into) plus a transactional keyed module model (`defineKeyedModule`)
+  where reducers touch individual records through a copy-on-write `StoreView` —
+  only the touched keys in memory per command. Sorted iteration + clone-on-read
+  keep it deterministic (a cross-incidental-order test proves the store converges
+  regardless of apply order of independent commands); keyed and whole-state
+  modules coexist in snapshot/restore. Additive — the consensus core is untouched.
 
-**Remaining frontier (still deferred):** the pluggable embedded state-store
-backend (the *state-larger-than-RAM* half of pillar 4); **multi-Raft sharding**
-with cross-shard sagas/2PC (the write-scaling half of pillars 4/6) — genuinely
-large; a preemptive **CPU/step "gas" meter** and a true **`vm`/worker determinism
-sandbox** (M5 delivers static-lint + a deterministic size bound, which need a
-sandbox to become airtight); and an optional **BFT consensus swap** (pillar 7)
-for multi-party trustlessness beyond the single trust domain. These are the next
+**Remaining frontier (still deferred):** **multi-Raft sharding** with cross-shard
+sagas/2PC (the write-scaling half of pillars 4/6) — genuinely large; a preemptive
+**CPU/step "gas" meter** and a true **`vm`/worker determinism sandbox** (M5
+delivers static-lint + a deterministic size/write bound, which need a sandbox to
+become airtight); and an optional **BFT consensus swap** (pillar 7) for
+multi-party trustlessness beyond the single trust domain. These are the next
 increments of the roadmap above.
