@@ -1,5 +1,7 @@
 import express from 'express';
-import { ModuleNode } from '../runtime/moduleStateMachine';
+import { Consensus } from '../consensus/consensus';
+import { ModuleStateMachine } from '../runtime/moduleStateMachine';
+import { ModuleAppCommand } from '../runtime/types';
 import { createModuleController } from '../controllers/moduleController';
 
 /**
@@ -11,7 +13,7 @@ import { createModuleController } from '../controllers/moduleController';
  * a literal `query`/`state` segment can never be mis-bound as a command name.
  * (They are also GET vs POST, but ordering keeps the intent unambiguous.)
  */
-export default function moduleRoutes(node: ModuleNode) {
+export default function moduleRoutes(node: Consensus<ModuleAppCommand, unknown, ModuleStateMachine>) {
     const router = express.Router();
     const c = createModuleController(node);
 

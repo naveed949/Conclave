@@ -1,14 +1,17 @@
 import express from 'express';
-import { RaftNode } from '../consensus/raftNode';
-import { StateMachine } from '../consensus/stateMachine';
+import { Consensus } from '../consensus/consensus';
 import { AppCommand } from '../consensus/types';
 
 /**
  * The replicated, hash-chained audit log — a built-in, tamper-evident history
  * of every committed state change, available on every node. Application-agnostic.
+ *
+ * Depends only on the {@link Consensus} seam (`node.stateMachine`), not on Raft:
+ * the audit trail is a property of the committed-ordered log, so it works
+ * unchanged under any engine that implements `Consensus` (ADR-0021).
  */
-export default function auditRoutes<C extends AppCommand, T, SM extends StateMachine<C, T>>(
-    node: RaftNode<C, T, SM>,
+export default function auditRoutes<C extends AppCommand, T, A>(
+    node: Consensus<C, T, A>,
 ) {
     const router = express.Router();
 

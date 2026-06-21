@@ -1,10 +1,19 @@
 import { Request, Response } from 'express';
+import { Consensus } from '../consensus/consensus';
 import { NotLeaderError } from '../consensus/raftNode';
 import { CommandMeta } from '../consensus/types';
 import { getContext } from '../platform/requestContext';
 import { forwardToLeader, isForwarded } from '../platform/forward';
 import { buildModuleCommand } from '../runtime/command';
-import { ModuleNode } from '../runtime/moduleStateMachine';
+import { ModuleStateMachine } from '../runtime/moduleStateMachine';
+import { ModuleAppCommand } from '../runtime/types';
+
+/**
+ * The consensus seam this controller depends on, specialized to the module
+ * runtime: `node.app` is the {@link ModuleStateMachine}, so `node.app.host`
+ * resolves to the live `ModuleHost` the controller reads queries/state from.
+ */
+type ModuleConsensus = Consensus<ModuleAppCommand, unknown, ModuleStateMachine>;
 
 /** A linearizable read is requested via `?consistency=strong` or `X-Consistency: strong`. */
 function wantsStrongRead(req: Request): boolean {
@@ -29,7 +38,7 @@ function wantsStrongRead(req: Request): boolean {
  * deliberately outside the signed payload) and every replica verifies the
  * signature on the deterministic apply path. The adapter does no signing itself.
  */
-export function createModuleController(node: ModuleNode) {
+export function createModuleController(node: ModuleConsensus) {
     // Forward to the leader (or reply 421) when this node isn't the leader.
     const onNotLeader = async (req: Request, res: Response, err: NotLeaderError): Promise<void> => {
         const leaderUrl = node.getLeaderUrl();

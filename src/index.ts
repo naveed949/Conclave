@@ -8,6 +8,9 @@
 // Consensus core
 export { RaftNode, NotLeaderError, MembershipError } from './consensus/raftNode';
 export type { RaftConfig } from './consensus/raftNode';
+// The ordering/commit seam above the log (ADR-0021): the application-facing
+// contract `RaftNode` implements and a future BFT engine would implement instead.
+export type { Consensus, ConsensusOf } from './consensus/consensus';
 export type { StateMachine } from './consensus/stateMachine';
 export { ReplicatedStateMachine, DEFAULT_DEDUP_LIMIT } from './consensus/replicatedStateMachine';
 export type { RsmSnapshot } from './consensus/replicatedStateMachine';
