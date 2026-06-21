@@ -209,11 +209,19 @@ the consensus core; M4–M7 wire it into real Raft and harden it.
   keep it deterministic (a cross-incidental-order test proves the store converges
   regardless of apply order of independent commands); keyed and whole-state
   modules coexist in snapshot/restore. Additive — the consensus core is untouched.
+- **M9 — `vm` determinism sandbox + step meter (pillars 2, 6).** Opt-in
+  (`defineModule(def, { sandbox: true })`) execution of whole-state reducers inside
+  a Node `vm` context that enforces determinism by *removal* — `Date`, timers,
+  `crypto`, `Intl` and the locale-sensitive prototype methods are deleted/thrown,
+  so a careless reducer reaching for ambient non-determinism throws instead of
+  silently diverging replicas. The apply path runs the sandbox timeout-free
+  (deterministic); a leader-side `admit()` dry-runs with a `vm` wall-clock timeout
+  to reject runaways before they enter the log (the gas/CFT model). Honestly
+  scoped: `vm` is a determinism aid, not a security boundary.
 
 **Remaining frontier (still deferred):** **multi-Raft sharding** with cross-shard
-sagas/2PC (the write-scaling half of pillars 4/6) — genuinely large; a preemptive
-**CPU/step "gas" meter** and a true **`vm`/worker determinism sandbox** (M5
-delivers static-lint + a deterministic size/write bound, which need a sandbox to
-become airtight); and an optional **BFT consensus swap** (pillar 7) for
-multi-party trustlessness beyond the single trust domain. These are the next
-increments of the roadmap above.
+sagas/2PC (the write-scaling half of pillars 4/6) — architecturally significant,
+tracked in its own ADR; and an optional **BFT consensus swap** (pillar 7) for
+multi-party trustlessness beyond the single trust domain — a protocol-level
+replacement well beyond a prototype increment, documented as a seam rather than
+built. These are the next increments of the roadmap above.

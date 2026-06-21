@@ -44,7 +44,8 @@ book demo.
 | `projection.ts` / `projectionHost.ts` | CQRS read side: derived, rebuildable read model off the apply path | M6 |
 | `stateStore.ts` | `StateStore` interface + in-memory `MemoryStateStore` + copy-on-write `StoreView` (the seam for a persistent KV) | M8 |
 | `keyedModule.ts` | `defineKeyedModule` / `KeyedReducer` — record-addressed modules that touch only the keys they need | M8 |
-| `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle), `accounts` (keyed) | M1–M2, M8 |
+| `sandbox.ts` | `vm` determinism sandbox (enforce-by-removal) + leader-side step/CPU meter (`admit`) | M9 |
+| `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle), `accounts` (keyed), `compute` (sandboxed) | M1–M2, M8–M9 |
 | `projections/` | Demo projection: `noteIndex` (notes indexed by actor) | M6 |
 
 The runtime rides **real consensus** (M4): a generic `MODULE` command in
