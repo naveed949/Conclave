@@ -1,9 +1,9 @@
 import { createHash } from 'crypto';
 
 /**
- * Module code-version hashing (ADR-0018 pillar 5). The audit records a hash of
+ * Module code-version hashing (ADR-0019 pillar 5). The audit records a hash of
  * the LOGIC that produced each result, so the history proves not just *what* the
- * data became but *which version of the code* computed it — closing ADR-0017's
+ * data became but *which version of the code* computed it — closing ADR-0018's
  * "tamper-evident data but not logic" gap.
  *
  * PROTOTYPE CAVEAT (stated honestly): `fn.toString()` is a STAND-IN for hashing

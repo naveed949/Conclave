@@ -1,5 +1,5 @@
 /**
- * `vm`-based determinism sandbox + leader-side step/CPU meter (ADR-0018
+ * `vm`-based determinism sandbox + leader-side step/CPU meter (ADR-0019
  * pillars 2 and 6). This is the M9 hardening the prototype-status note flagged
  * as missing: M5 enforced determinism with a STATIC lint (bypassable by
  * obfuscation) and a deterministic size/write bound; this module adds the

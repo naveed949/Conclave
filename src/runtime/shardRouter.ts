@@ -1,9 +1,18 @@
 import { createHash } from 'crypto';
-import { RaftNode } from '../consensus/raftNode';
-import { ApplyResult, Command, CommandMeta } from '../consensus/types';
+import { AppCommand, ApplyResult, CommandMeta } from '../consensus/types';
 
 /**
- * Multi-Raft shard router (ADR-0019, M10).
+ * The minimal node surface the router needs: ask who leads, and submit to it.
+ * Structural so any `RaftNode<C, T>` (e.g. a {@link ModuleNode}) fits without the
+ * router depending on the concrete node/state-machine types.
+ */
+export interface ShardNode<C extends AppCommand, T> {
+    isLeader(): boolean;
+    submit(command: C, meta?: CommandMeta): Promise<ApplyResult<T>>;
+}
+
+/**
+ * Multi-Raft shard router (ADR-0020, M10).
  *
  * Each shard is an INDEPENDENT single-group Raft cluster — its own nodes, its own
  * leader election, its own replicated log + ModuleHost. The router is a thin,
@@ -13,7 +22,7 @@ import { ApplyResult, Command, CommandMeta } from '../consensus/types';
  * leadership — so it can be reconstructed at any time and every participant that
  * shares the same shard count computes the same routing.
  *
- * Routing model (ADR-0019 "Sharding key"): the shard is a PURE, deterministic
+ * Routing model (ADR-0020 "Sharding key"): the shard is a PURE, deterministic
  * function of the partition key — `sha256(key) mod N`. No `Date`/`Math.random`,
  * so the same key always lands on the same shard on every node and on every
  * process restart. Writes to different shards proceed in parallel (different
@@ -27,9 +36,9 @@ import { ApplyResult, Command, CommandMeta } from '../consensus/types';
  * what lets tests wire in `buildCluster(3)` per shard and `buildModuleCommand`
  * for the payload without the router knowing about either.
  */
-export interface ShardHandle {
+export interface ShardHandle<C extends AppCommand = AppCommand, T = unknown> {
     /** Every node in this shard's Raft group (used to locate the current leader). */
-    nodes: RaftNode[];
+    nodes: ShardNode<C, T>[];
 }
 
 /** Raised when a shard currently has no known leader; the caller should retry. */
@@ -40,15 +49,15 @@ export class NoShardLeaderError extends Error {
     }
 }
 
-export class ShardRouter {
-    private readonly shards: ShardHandle[];
+export class ShardRouter<C extends AppCommand = AppCommand, T = unknown> {
+    private readonly shards: ShardHandle<C, T>[];
 
     /**
      * @param shards one handle per shard, index `i` == shard number `i`. The shard
      *   COUNT (`shards.length`) is the modulus of the routing function, so it must
      *   be identical on every participant for routing to agree.
      */
-    constructor(shards: ShardHandle[]) {
+    constructor(shards: ShardHandle<C, T>[]) {
         if (shards.length === 0) {
             throw new Error('ShardRouter requires at least one shard');
         }
@@ -63,7 +72,7 @@ export class ShardRouter {
     /**
      * Deterministic shard mapping: `sha256(partitionKey) mod N`. Pure — depends
      * ONLY on the key and the shard count, never on wall-clock or randomness — so
-     * every node derives the same shard for the same key (ADR-0019). The first 6
+     * every node derives the same shard for the same key (ADR-0020). The first 6
      * hex digits (24 bits) of the digest are ample entropy for a small N and keep
      * the arithmetic inside a safe integer.
      */
@@ -77,7 +86,7 @@ export class ShardRouter {
      * The current leader of `shard`, or `null` if none is presently known (e.g.
      * mid-election). Derived live from the group — the router caches nothing.
      */
-    leaderOf(shard: number): RaftNode | null {
+    leaderOf(shard: number): ShardNode<C, T> | null {
         const handle = this.shards[shard];
         if (!handle) {
             throw new RangeError(`no such shard: ${shard}`);
@@ -91,9 +100,9 @@ export class ShardRouter {
      * per-shard correctness (determinism, idempotency, audit) is unchanged. If the
      * owning shard has no known leader right now, reject with
      * {@link NoShardLeaderError} so the caller can retry across a leader change —
-     * the router does no buffering of its own (ADR-0019 "Routing/membership").
+     * the router does no buffering of its own (ADR-0020 "Routing/membership").
      */
-    submit(partitionKey: string, command: Command, meta?: CommandMeta): Promise<ApplyResult> {
+    submit(partitionKey: string, command: C, meta?: CommandMeta): Promise<ApplyResult<T>> {
         const shard = this.shardFor(partitionKey);
         const leader = this.leaderOf(shard);
         if (!leader) {

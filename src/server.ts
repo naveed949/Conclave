@@ -6,6 +6,7 @@ import { FileStorage } from './consensus/storage';
 import { getPort, loadRaftConfig } from './consensus/config';
 import { createLogger } from './platform/logger';
 import { metrics } from './platform/metrics';
+import { BookStateMachine } from './models/bookStateMachine';
 
 dotenv.config();
 
@@ -13,7 +14,12 @@ const logger = createLogger();
 const config = loadRaftConfig();
 const storage = new FileStorage(config.id, process.env.DATA_DIR || './data');
 
-const node = new RaftNode({ ...config, logger, metrics, storage }, new HttpTransport());
+// Plug the book application into the consensus core. Swap in any other
+// StateMachine here to run a different domain on the same substrate.
+const node = new RaftNode(
+    { ...config, stateMachine: new BookStateMachine(), logger, metrics, storage },
+    new HttpTransport(),
+);
 
 // Refresh Raft gauges whenever /metrics is scraped.
 metrics.registerCollector(() => node.collectMetrics());

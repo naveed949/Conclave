@@ -34,7 +34,7 @@ const DEFAULT_STEP_BUDGET_MS = 50;
 /**
  * A registrable module: either a whole-state `ModuleDefinition` (no `kind`, the
  * original model) or a key-oriented `KeyedModuleDefinition` (`kind: 'keyed'`,
- * ADR-0018 pillar 4). The host discriminates on `kind`, defaulting absent to
+ * ADR-0019 pillar 4). The host discriminates on `kind`, defaulting absent to
  * whole-state for back-compat.
  */
 export type AnyModuleDefinition = ModuleDefinition<unknown> | KeyedModuleDefinition;
@@ -56,7 +56,7 @@ function deepClone<T>(value: T): T {
 }
 
 /**
- * Registry of modules plus their live state (ADR-0018 pillars 1–2). This is the
+ * Registry of modules plus their live state (ADR-0019 pillars 1–2). This is the
  * deterministic runtime that a later milestone will drive from the replicated
  * `apply()` path. Today it stands alone: register modules, then `apply` commands
  * whose seeds were resolved on the leader. Because the host derives every
@@ -68,7 +68,7 @@ export class ModuleHost {
     /** Live per-module WHOLE-STATE blob, keyed by module name. */
     private readonly states = new Map<string, unknown>();
     /**
-     * Per-module record store for KEYED modules (ADR-0018 pillar 4), keyed by
+     * Per-module record store for KEYED modules (ADR-0019 pillar 4), keyed by
      * module name. A keyed module has an entry here and NONE in `states`; a
      * whole-state module is the reverse. The default `MemoryStateStore` is the
      * in-memory backend; the `StateStore` seam is where a persistent embedded
@@ -76,7 +76,7 @@ export class ModuleHost {
      */
     private readonly stores = new Map<string, StateStore>();
     /**
-     * The deterministic outbox (ADR-0018 pillar 3), keyed by `idempotencyKey`.
+     * The deterministic outbox (ADR-0019 pillar 3), keyed by `idempotencyKey`.
      * Every host derives it from the same committed command stream, so it is
      * itself replicated state — part of `snapshot()`/`restore()`. Keying on the
      * idempotency key is what makes enqueue idempotent: a replayed command can
@@ -84,13 +84,13 @@ export class ModuleHost {
      */
     private readonly outbox = new Map<string, OutboxEntry>();
     /**
-     * Per-module code-version hash (ADR-0018 pillar 5), computed at `register()`
+     * Per-module code-version hash (ADR-0019 pillar 5), computed at `register()`
      * from the module's logic. Every audited leaf stamps the hash of the module
      * that produced it, so the history proves WHICH logic version ran.
      */
     private readonly codeHashes = new Map<string, string>();
     /**
-     * Compiled sandbox reducers for `sandbox: true` whole-state modules (ADR-0018
+     * Compiled sandbox reducers for `sandbox: true` whole-state modules (ADR-0019
      * M9), keyed `module/command`. Built ONCE at `register()` by re-evaluating
      * each reducer's source inside a fresh `vm` context with a frozen safe-global
      * set. Present only for sandboxed modules; absent modules dispatch directly as
@@ -99,7 +99,7 @@ export class ModuleHost {
      */
     private readonly compiled = new Map<string, CompiledReducer>();
     /**
-     * The Merkle audit accumulator (ADR-0018 pillar 5). Replicated state: it is
+     * The Merkle audit accumulator (ADR-0019 pillar 5). Replicated state: it is
      * derived purely from the applied command stream, so two hosts fed the same
      * stream produce the same `auditRoot()`. Folded into `snapshot()`/`restore()`.
      */
@@ -111,7 +111,7 @@ export class ModuleHost {
     private auditSeq = 0;
 
     /**
-     * Deterministic resource bound (ADR-0018 pillar 6): the max effects one
+     * Deterministic resource bound (ADR-0019 pillar 6): the max effects one
      * command may emit and the max canonical byte size of the next-state it may
      * produce. Computed identically on every replica, so over-budget commands
      * are rejected uniformly — NOT a CPU meter (that is deferred; needs a vm).
@@ -121,14 +121,14 @@ export class ModuleHost {
     private readonly maxWrites: number;
     /**
      * Default wall-clock step budget (ms) for the leader-side admission meter
-     * (ADR-0018 pillar 6 — M9), used when a sandboxed module does not set its own
+     * (ADR-0019 pillar 6 — M9), used when a sandboxed module does not set its own
      * `stepBudgetMs`. Only the admission dry-run consults it; the apply path is
      * always timeout-free.
      */
     private readonly stepBudgetMs: number;
 
     /**
-     * Optional actor->public-key registry (ADR-0018 pillar 7). When SET, every
+     * Optional actor->public-key registry (ADR-0019 pillar 7). When SET, every
      * caller `apply()` must carry a valid actor signature over its logical
      * command or it is rejected (401) before its reducer runs. When UNSET
      * (default), no verification happens and behavior is exactly as before —
@@ -146,7 +146,7 @@ export class ModuleHost {
     }
 
     /**
-     * Configure the actor signature registry (ADR-0018 pillar 7). Call before
+     * Configure the actor signature registry (ADR-0019 pillar 7). Call before
      * start, identically on every node. Once set, caller commands are verified
      * on the apply path; until set, verification is skipped (back-compat).
      */
@@ -163,7 +163,7 @@ export class ModuleHost {
     /**
      * Register a module and initialize its state. Accepts BOTH a whole-state
      * `ModuleDefinition` and a key-oriented `KeyedModuleDefinition` (discriminated
-     * on `kind`, ADR-0018 pillar 4); a keyed module gets its own `StateStore`
+     * on `kind`, ADR-0019 pillar 4); a keyed module gets its own `StateStore`
      * instead of a whole-state blob. Throws on a duplicate name.
      */
     register(def: AnyModuleDefinition): void {
@@ -182,7 +182,7 @@ export class ModuleHost {
         if (this.modules.has(def.name)) {
             throw new Error(`Module "${def.name}" is already registered`);
         }
-        // Sandbox is a WHOLE-STATE feature for this milestone (ADR-0018 M9):
+        // Sandbox is a WHOLE-STATE feature for this milestone (ADR-0019 M9):
         // sandboxing keyed StoreView-mutating reducers is out of scope, so reject
         // the combination at registration rather than silently ignore the flag.
         if (isKeyed(def) && (def as { sandbox?: boolean }).sandbox) {
@@ -200,7 +200,7 @@ export class ModuleHost {
         } else {
             this.states.set(def.name, def.initialState());
             // If the module opted into the sandbox, compile each reducer ONCE now
-            // into its own frozen vm context (ADR-0018 M9). A non-self-contained
+            // into its own frozen vm context (ADR-0019 M9). A non-self-contained
             // reducer source (e.g. method-shorthand) fails loudly here, at
             // registration, rather than at first dispatch.
             if (def.sandbox) {
@@ -210,7 +210,7 @@ export class ModuleHost {
             }
         }
         // Stamp the module's logic version now; every leaf it later produces
-        // records this hash (ADR-0018 pillar 5).
+        // records this hash (ADR-0019 pillar 5).
         this.codeHashes.set(def.name, moduleCodeHash(def));
     }
 
@@ -227,7 +227,7 @@ export class ModuleHost {
      * single bad command never crashes the apply loop.
      */
     apply(cmd: ModuleCommand, meta: { actor: string; requestId: string }): ModuleApplyResult {
-        // Actor signature verification (ADR-0018 pillar 7), if a registry is
+        // Actor signature verification (ADR-0019 pillar 7), if a registry is
         // configured. This runs FIRST so a forged/tampered/unsigned command never
         // reaches its reducer and never touches state or the outbox. Verification
         // is a pure, deterministic function of the committed command + meta
@@ -257,7 +257,7 @@ export class ModuleHost {
     }
 
     /**
-     * Leader-side admission / step meter (ADR-0018 pillar 6 "gas" — M9). A
+     * Leader-side admission / step meter (ADR-0019 pillar 6 "gas" — M9). A
      * pre-log DRY RUN: the LEADER calls this BEFORE submitting a command to the
      * log; if it returns `ok: false`, the command is rejected and never enters the
      * log. Followers do NOT re-admit — under the CFT trust model they trust that a
@@ -325,7 +325,7 @@ export class ModuleHost {
     }
 
     /**
-     * Verify a caller command's actor signature (ADR-0018 pillar 7). Returns a
+     * Verify a caller command's actor signature (ADR-0019 pillar 7). Returns a
      * deterministic 401 `ModuleApplyResult` to REJECT, or `undefined` to ALLOW.
      *
      * Back-compat: with no registry configured, always allows (returns
@@ -401,7 +401,7 @@ export class ModuleHost {
         // earlier unknown-module/unknown-command 404s returned before this point
         // and are intentionally NOT audited — no logic ran for them.
         // For a sandboxed module, run the reducer inside its frozen vm context on
-        // the APPLY path with NO timeout (ADR-0018 M9): the call must be a pure,
+        // the APPLY path with NO timeout (ADR-0019 M9): the call must be a pure,
         // deterministic function of (state, input, ctx) so every replica computes
         // the same next-state. A banned global (Date, Math.random, …) is absent in
         // the sandbox and throws here, caught below as a 500 — structurally, not
@@ -415,7 +415,7 @@ export class ModuleHost {
                 : reducer(working, cmd.input, ctx);
             const effects = result.effects ?? [];
 
-            // Deterministic resource bound (ADR-0018 pillar 6). Computed AFTER the
+            // Deterministic resource bound (ADR-0019 pillar 6). Computed AFTER the
             // reducer returns, from its output alone — every replica derives the
             // same effect count and the same canonical byte size, so an
             // over-budget command is rejected identically everywhere (no
@@ -459,7 +459,7 @@ export class ModuleHost {
     }
 
     /**
-     * The KEYED reducer dispatch path (ADR-0018 pillar 4). Mirrors `dispatch`'s
+     * The KEYED reducer dispatch path (ADR-0019 pillar 4). Mirrors `dispatch`'s
      * atomicity and resource-bound envelope, but the reducer mutates a
      * transactional {@link StoreView} instead of returning a next-state blob:
      *
@@ -727,7 +727,7 @@ export class ModuleHost {
         this.auditSeq = auditSaved?.seq ?? this.audit.size();
     }
 
-    // ---- audit access (ADR-0018 pillar 5) ----
+    // ---- audit access (ADR-0019 pillar 5) ----
 
     /**
      * The compact Merkle root over all audited commands. A single hash that

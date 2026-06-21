@@ -1,15 +1,16 @@
-# Runtime — ADR-0018 prototype
+# Runtime — ADR-0019 prototype
 
 A prototype of the **deterministic core + effectful edge** design from
-[ADR-0018](../../docs/adr/0018-native-backend-blockchain-benefits.md): a way to
+[ADR-0019](../../docs/adr/0019-native-backend-blockchain-benefits.md): a way to
 write ordinary-looking backend modules that nonetheless inherit the blockchain
 benefits of the consensus substrate — deterministic replicated execution,
 exactly-once effects, and a provable tamper-evident audit.
 
-This layer sits **on top of** the consensus core (`src/consensus/`) and does not
-modify it. It is exercised by deterministic replay in `tests/runtime/`, which
-demonstrates the replicated-state-machine property without wiring a generic
-module command through `RaftNode` (a deferred next step — see the ADR).
+This layer plugs into the consensus core through the pluggable `StateMachine`
+seam (ADR-0017): a `ModuleStateMachine` adapts the `ModuleHost` to the framework
+contract, so the whole runtime rides real Raft as an ordinary application — no
+bespoke consensus-core support. The book service is just *another* `StateMachine`;
+this is the recommended one.
 
 ## The model
 
@@ -39,6 +40,7 @@ book demo.
 | `codeHash.ts` | Deterministic module code-version hash (POC stand-in for hashing the built artifact) | M3 |
 | `canonical.ts` | Single shared canonical (sorted-key) JSON serializer used by every hash/size path | M5 |
 | `determinism.ts` | Static determinism lint + `canonicalBytes` for the deterministic resource bound | M5 |
+| `moduleStateMachine.ts` | Adapts `ModuleHost` to the framework `StateMachine` seam (ADR-0017) — plug it into a `RaftNode` | M4 |
 | `command.ts` | Leader-side `buildModuleCommand` / `buildSignedModuleCommand` (resolve seed, optionally sign) | M4, M7 |
 | `signing.ts` | ed25519 sign/verify over the logical payload + `KeyRegistry` (actor→authorized key) | M7 |
 | `projection.ts` / `projectionHost.ts` | CQRS read side: derived, rebuildable read model off the apply path | M6 |
@@ -49,11 +51,12 @@ book demo.
 | `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle), `accounts` (keyed), `compute` (sandboxed) | M1–M2, M8–M9 |
 | `projections/` | Demo projection: `noteIndex` (notes indexed by actor) | M6 |
 
-The runtime rides **real consensus** (M4): a generic `MODULE` command in
-`src/consensus/types.ts` routes through `ReplicatedStateMachine` to an embedded
-`ModuleHost`, so a multi-node cluster converges on identical module state and
-audit root. See `tests/runtime/consensusIntegration.test.ts` and
-`tests/runtime/signing.test.ts` for the end-to-end proofs.
+The runtime rides **real consensus** (M4): a `ModuleAppCommand` is an ordinary
+application command, and `ModuleStateMachine` is the application a `RaftNode`
+replicates — so a multi-node cluster converges on identical module state and
+audit root with no special core support. See
+`tests/runtime/consensusIntegration.test.ts` and `tests/runtime/signing.test.ts`
+for the end-to-end proofs.
 
 ## Writing a module
 

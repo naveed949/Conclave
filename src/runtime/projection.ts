@@ -1,5 +1,5 @@
 /**
- * CQRS read-projection layer (ADR-0018 pillar 4: "Reads / rich queries / big
+ * CQRS read-projection layer (ADR-0019 pillar 4: "Reads / rich queries / big
  * data").
  *
  * The authoritative state is the replicated log applied by `ModuleHost` — that

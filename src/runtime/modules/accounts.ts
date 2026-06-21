@@ -1,7 +1,7 @@
 import { defineKeyedModule } from '../keyedModule';
 
 /**
- * A demo KEYED module (ADR-0018 pillar 4, "state larger than RAM"): a ledger of
+ * A demo KEYED module (ADR-0019 pillar 4, "state larger than RAM"): a ledger of
  * accounts where state is ONE RECORD PER ACCOUNT, addressed by account id. Every
  * command touches only the keys it needs — `deposit` reads/writes a single
  * account, `transfer` exactly two — so the whole ledger is NEVER loaded as a
@@ -58,7 +58,7 @@ export const accounts = defineKeyedModule({
 
         /**
          * Read the single account by key, subtract `amount`, write it back. The
-         * single-key debit half of a CROSS-SHARD transfer (ADR-0019): a cross-shard
+         * single-key debit half of a CROSS-SHARD transfer (ADR-0020): a cross-shard
          * transfer cannot be one `transfer` command (the two accounts live in
          * different Raft groups), so the saga composes `withdraw` on the source
          * shard with `deposit` on the target shard. Rejects (non-200) on a missing

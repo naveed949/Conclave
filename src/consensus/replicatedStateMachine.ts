@@ -1,35 +1,26 @@
 import { createHash } from 'crypto';
-import { BookStateMachine } from './stateMachine';
-import { ApplyResult, AuditEntry, Book, LogEntry } from './types';
-import { ModuleHost } from '../runtime/moduleHost';
-import { ModuleDefinition } from '../runtime/types';
-import { EMPTY_ROOT } from '../runtime/merkleAudit';
-import { KeyRegistry } from '../runtime/signing';
+import { StateMachine } from './stateMachine';
+import { AppCommand, ApplyResult, AuditEntry, LogEntry } from './types';
 
 const GENESIS_HASH = '0'.repeat(64);
 
 /** Default cap on the idempotency dedup cache (number of remembered requestIds). */
 export const DEFAULT_DEDUP_LIMIT = 10_000;
 
-/** Serializable snapshot of the full replicated state (books + audit + dedup). */
-export interface RsmSnapshot {
-    books: Book[];
+/** Serializable snapshot of the full replicated state (app state + audit + dedup). */
+export interface RsmSnapshot<T = unknown> {
+    /** The application state machine's own serialized state. */
+    state: unknown;
     audit: AuditEntry[];
-    seen: [string, ApplyResult][];
+    seen: [string, ApplyResult<T>][];
     lastHash: string;
-    /**
-     * The embedded {@link ModuleHost} snapshot (module state + outbox + Merkle
-     * audit). Optional for back-compat: snapshots taken before module wiring (or
-     * by a node with no modules registered) omit it, and `restore()` tolerates
-     * its absence.
-     */
-    modules?: Record<string, unknown>;
 }
 
 /**
- * Wraps the domain {@link BookStateMachine} with two cross-cutting, generic
+ * Wraps an application {@link StateMachine} with two cross-cutting, generic
  * backend concerns that every node gets for free because they ride the same
- * deterministic, replicated apply path:
+ * deterministic, replicated apply path — regardless of which application is
+ * plugged in:
  *
  *  - **Audit**: an append-only, hash-chained record of every committed change.
  *    Replicated across the cluster and tamper-evident (alter one entry and the
@@ -37,6 +28,11 @@ export interface RsmSnapshot {
  *  - **Idempotency**: commands carry a requestId; a replayed requestId returns
  *    the original result without re-applying, turning at-least-once delivery
  *    into exactly-once effects (key for fault-tolerant client retries).
+ *
+ * The framework's control commands (`NOOP`, `CONFIG`) have no application
+ * effect: they are not forwarded to the wrapped state machine (`NOOP` is also
+ * kept out of the audit). Everything else is an application command, delegated
+ * to `app.apply`.
  *
  * The dedup cache is bounded ({@link DEFAULT_DEDUP_LIMIT}) so it — and therefore
  * the snapshots it is folded into — cannot grow without limit. Eviction is
@@ -46,79 +42,34 @@ export interface RsmSnapshot {
  * the cluster.) The trade-off: a retry of a request older than the window is no
  * longer deduped and re-applies — acceptable, since realistic retries are recent.
  */
-export class ReplicatedStateMachine {
-    private readonly books = new BookStateMachine();
-    /**
-     * The embedded module runtime (ADR-0018 pillars 1–2). Lazily created when the
-     * first module is registered, so a node that never uses modules carries no
-     * host and emits no `modules` field in its snapshot (back-compat).
-     */
-    private moduleHost?: ModuleHost;
+export class ReplicatedStateMachine<C extends AppCommand, T = unknown> {
     private readonly audit: AuditEntry[] = [];
-    private readonly seen = new Map<string, ApplyResult>();
+    private readonly seen = new Map<string, ApplyResult<T>>();
     private lastHash = GENESIS_HASH;
     private readonly dedupLimit: number;
 
-    constructor(dedupLimit: number = DEFAULT_DEDUP_LIMIT) {
+    constructor(
+        private readonly app: StateMachine<C, T>,
+        dedupLimit: number = DEFAULT_DEDUP_LIMIT,
+    ) {
         this.dedupLimit = dedupLimit > 0 ? dedupLimit : DEFAULT_DEDUP_LIMIT;
     }
 
-    // ---- module registration (run on every node BEFORE start) ----
-
-    /** Lazily create and return the embedded ModuleHost. */
-    private host(): ModuleHost {
-        if (!this.moduleHost) this.moduleHost = new ModuleHost();
-        return this.moduleHost;
-    }
-
-    /** Register one module so its reducers can apply on this node's MODULE path. */
-    registerModule(def: ModuleDefinition<any>): void {
-        this.host().register(def);
-    }
-
-    /** Register several modules at once. */
-    registerModules(defs: ModuleDefinition<any>[]): void {
-        for (const def of defs) this.host().register(def);
-    }
-
-    /**
-     * Configure the actor signature registry (ADR-0018 pillar 7), delegating to
-     * the embedded host. Call on every node before start, with the SAME registry
-     * contents, so signature verification on the MODULE apply path converges. A
-     * node left without a registry verifies nothing — the back-compat default.
-     */
-    setKeyRegistry(reg: KeyRegistry): void {
-        this.host().setKeyRegistry(reg);
-    }
-
-    /** Authorize `publicKeyPem` as the signer for `actor` on this node's host. */
-    registerActorKey(actor: string, publicKeyPem: string): void {
-        this.host().registerActorKey(actor, publicKeyPem);
-    }
-
     /** Apply a committed log entry at `index`. Deterministic across nodes. */
-    apply(index: number, entry: LogEntry): ApplyResult {
+    apply(index: number, entry: LogEntry<C>): ApplyResult<T> {
         const { command, meta } = entry;
 
-        // Idempotency FIRST — covers MODULE commands too: a replayed requestId
-        // yields the cached result without re-running the reducer (so a retried
-        // increment never double-applies). NOTE: failure results are cached too,
-        // including an auth 401 from signature verification (ADR-0018 pillar 7).
-        // Because a signature binds the requestId, a corrected retry re-signs and
-        // should carry a FRESH requestId — otherwise it is short-circuited to the
-        // cached 401 here until that entry is evicted (FIFO). Caching is uniform
-        // across replicas, so this stays convergent.
+        // Idempotency: a replayed requestId yields the cached result, no re-apply.
         if (meta?.requestId && this.seen.has(meta.requestId)) {
             return this.seen.get(meta.requestId)!;
         }
 
-        // MODULE commands are a runtime concern: dispatch them to the embedded
-        // ModuleHost. Everything else applies to the book store. Both paths share
-        // the hash-chain audit + idempotency bookkeeping below for uniformity.
-        const result: ApplyResult =
-            command.type === 'MODULE'
-                ? this.applyModule(command, meta)
-                : this.books.apply(command);
+        // Control commands (NOOP/CONFIG) have no application effect; everything
+        // else is an application command handled by the wrapped state machine.
+        const result: ApplyResult<T> =
+            command.type === 'NOOP' || command.type === 'CONFIG'
+                ? { status: 200 }
+                : this.app.apply(command as C);
 
         // NOOP entries are internal Raft bookkeeping — keep them out of the audit.
         if (command.type !== 'NOOP') {
@@ -142,40 +93,8 @@ export class ReplicatedStateMachine {
         return result;
     }
 
-    /**
-     * Dispatch a MODULE command to the embedded ModuleHost and map its
-     * `ModuleApplyResult` onto the generic `ApplyResult` the apply path expects.
-     * The ModuleHost keeps its own richer Merkle audit; the hash-chain audit in
-     * `apply()` still records the MODULE envelope (type + status) for uniformity.
-     */
-    private applyModule(
-        command: Extract<LogEntry['command'], { type: 'MODULE' }>,
-        meta: LogEntry['meta'],
-    ): ApplyResult {
-        const host = this.host();
-        const moduleResult = host.apply(
-            {
-                module: command.module,
-                command: command.command,
-                input: command.input,
-                seed: command.seed,
-                // Thread the actor signature through so the host can verify it
-                // against a configured registry (ADR-0018 pillar 7). Undefined
-                // when the command was built unsigned — then the host (if it has
-                // a registry) rejects 401, else ignores it (back-compat).
-                sig: command.sig,
-            },
-            { actor: meta?.actor ?? 'system', requestId: meta?.requestId ?? '' },
-        );
-        return {
-            status: moduleResult.status,
-            result: moduleResult.result,
-            message: moduleResult.message,
-        };
-    }
-
     /** Record a result, evicting the oldest entries (FIFO) past the cap. */
-    private remember(requestId: string, result: ApplyResult): void {
+    private remember(requestId: string, result: ApplyResult<T>): void {
         this.seen.set(requestId, result);
         while (this.seen.size > this.dedupLimit) {
             // Map preserves insertion order, so the first key is the oldest.
@@ -210,58 +129,38 @@ export class ReplicatedStateMachine {
 
     // ---- snapshot / restore (for log compaction) ----
 
-    snapshot(): RsmSnapshot {
-        const snap: RsmSnapshot = {
-            books: this.books.getAll(),
+    snapshot(): RsmSnapshot<T> {
+        return {
+            state: this.app.snapshot(),
             audit: this.getAuditLog(),
             seen: [...this.seen.entries()],
             lastHash: this.lastHash,
         };
-        // Fold the module runtime into the snapshot so module state, outbox, and
-        // Merkle audit survive log compaction/restart. Omit the field entirely
-        // when no host exists, keeping snapshots of module-free nodes unchanged.
-        if (this.moduleHost) snap.modules = this.moduleHost.snapshot();
-        return snap;
     }
 
-    restore(snap: RsmSnapshot): void {
-        this.books.load(snap.books);
+    restore(snap: RsmSnapshot<T>): void {
+        this.app.restore(snap.state);
         this.audit.length = 0;
         this.audit.push(...snap.audit);
         this.seen.clear();
         for (const [k, v] of snap.seen) this.seen.set(k, v);
         this.lastHash = snap.lastHash;
-        // Rehydrate the module runtime. Guard back-compat: older snapshots (and
-        // those from module-free nodes) carry no `modules` field, so only restore
-        // when both the snapshot has it and modules are registered on this node.
-        if (snap.modules && this.moduleHost) this.moduleHost.restore(snap.modules);
     }
 
-    // ---- domain access (delegated) ----
+    // ---- application access ----
 
-    getAll(): Book[] { return this.books.getAll(); }
-    get(id: string): Book | undefined { return this.books.get(id); }
-    size(): number { return this.books.size(); }
+    /** The wrapped application state machine (for domain reads). */
+    get application(): StateMachine<C, T> {
+        return this.app;
+    }
+
+    /** Entity count from the application state machine (0 if it doesn't track one). */
+    size(): number {
+        return this.app.size?.() ?? 0;
+    }
 
     /** Current number of remembered requestIds (bounded by the dedup limit). */
-    dedupCacheSize(): number { return this.seen.size; }
-
-    // ---- module access (ADR-0018 runtime) ----
-
-    /** Run a read query against a module's state (undefined if no host/module). */
-    moduleQuery(module: string, name: string, args?: unknown): unknown {
-        return this.moduleHost?.query(module, name, args);
-    }
-
-    /** Current live state of a module (undefined if no host/module). */
-    moduleState(module: string): unknown {
-        return this.moduleHost?.getState(module);
-    }
-
-    /** The module runtime's Merkle audit root (the empty-tree root if no host). */
-    moduleAuditRoot(): string {
-        // A read must never allocate a host: a module-free node stays provably
-        // host-free (and its snapshots provably unchanged) even if queried.
-        return this.moduleHost ? this.moduleHost.auditRoot() : EMPTY_ROOT;
+    dedupCacheSize(): number {
+        return this.seen.size;
     }
 }

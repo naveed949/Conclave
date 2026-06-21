@@ -1,9 +1,11 @@
 import { ReplicatedStateMachine, RsmSnapshot } from './replicatedStateMachine';
+import { StateMachine } from './stateMachine';
 import { MemoryStorage, RaftStorage, PersistentState } from './storage';
 import { RpcHandler, Transport } from './transport';
 import { Logger } from '../platform/logger';
 import { MetricsRegistry } from '../platform/metrics';
 import {
+    AppCommand,
     AppendEntriesArgs,
     AppendEntriesReply,
     ApplyResult,
@@ -11,6 +13,7 @@ import {
     CommandMeta,
     InstallSnapshotArgs,
     InstallSnapshotReply,
+    isConfigCommand,
     LogEntry,
     PeerInfo,
     RequestVoteArgs,
@@ -18,9 +21,19 @@ import {
     Role,
 } from './types';
 
-export interface RaftConfig {
+export interface RaftConfig<
+    C extends AppCommand = AppCommand,
+    T = unknown,
+    SM extends StateMachine<C, T> = StateMachine<C, T>,
+> {
     id: string;
     peers: PeerInfo[];
+    /**
+     * The application state machine this node replicates. Typed as the
+     * intersection so that, given a concrete state machine, TypeScript infers the
+     * command (`C`) and result (`T`) types from it at the construction site.
+     */
+    stateMachine: SM & StateMachine<C, T>;
     /** This node's own address, advertised to peers in membership configs. */
     selfUrl?: string;
     electionMinMs?: number;
@@ -52,9 +65,9 @@ export class MembershipError extends Error {
     }
 }
 
-interface PendingProposal {
+interface PendingProposal<T> {
     term: number;
-    resolve: (result: ApplyResult) => void;
+    resolve: (result: ApplyResult<T>) => void;
     reject: (err: Error) => void;
 }
 
@@ -74,20 +87,27 @@ interface ReadWaiter {
  * `log[p]` has absolute index `lastIncludedIndex + p`. Entries up to and
  * including a snapshot are discarded, so the in-memory log stays bounded.
  */
-export class RaftNode implements RpcHandler {
+export class RaftNode<
+    C extends AppCommand = AppCommand,
+    T = unknown,
+    SM extends StateMachine<C, T> = StateMachine<C, T>,
+> implements RpcHandler {
     readonly id: string;
     private readonly selfPeer: PeerInfo;
     private readonly transport: Transport;
     private readonly storage: RaftStorage;
     private readonly logger?: Logger;
     private readonly metrics?: MetricsRegistry;
-    readonly stateMachine: ReplicatedStateMachine;
+    /** The application state machine plugged into this node (for domain reads). */
+    readonly app: SM;
+    /** Substrate wrapper adding audit + idempotency over the application state machine. */
+    private readonly rsm: ReplicatedStateMachine<C, T>;
 
     // Persistent state.
     private currentTerm = 0;
     private votedFor: string | null = null;
     /** log[0] is a sentinel at absolute index `lastIncludedIndex`. */
-    private log: LogEntry[] = [{ term: 0, command: { type: 'NOOP' } }];
+    private log: LogEntry<C>[] = [{ term: 0, command: { type: 'NOOP' } }];
     private lastIncludedIndex = 0;
     private lastIncludedTerm = 0;
 
@@ -116,7 +136,7 @@ export class RaftNode implements RpcHandler {
     private heartbeatTimer: NodeJS.Timeout | null = null;
 
     // Proposals awaiting commit, keyed by absolute log index.
-    private pending = new Map<number, PendingProposal>();
+    private pending = new Map<number, PendingProposal<T>>();
 
     // Linearizable-read barriers awaiting the state machine to apply through an index.
     private readWaiters: ReadWaiter[] = [];
@@ -127,7 +147,7 @@ export class RaftNode implements RpcHandler {
     private readonly snapshotThreshold: number;
     private running = false;
 
-    constructor(config: RaftConfig, transport: Transport) {
+    constructor(config: RaftConfig<C, T, SM>, transport: Transport) {
         this.id = config.id;
         this.selfPeer = { id: config.id, url: config.selfUrl ?? `local://${config.id}` };
         this.transport = transport;
@@ -138,7 +158,8 @@ export class RaftNode implements RpcHandler {
         this.electionMaxMs = config.electionMaxMs ?? 300;
         this.heartbeatMs = config.heartbeatMs ?? 50;
         this.snapshotThreshold = config.snapshotThreshold ?? 1000;
-        this.stateMachine = new ReplicatedStateMachine(config.dedupLimit);
+        this.app = config.stateMachine;
+        this.rsm = new ReplicatedStateMachine<C, T>(this.app, config.dedupLimit);
         // Bootstrap configuration: the peers from env plus this node itself.
         this.baseConfig = [this.selfPeer, ...config.peers];
         this.recomputeMembers();
@@ -162,7 +183,7 @@ export class RaftNode implements RpcHandler {
         const upto = this.pos(Math.min(absIndex, this.lastLogIndex()));
         for (let p = 1; p <= upto; p++) {
             const cmd = this.log[p]?.command;
-            if (cmd?.type === 'CONFIG') cfg = cmd.members;
+            if (cmd && isConfigCommand(cmd)) cfg = cmd.members;
         }
         return cfg;
     }
@@ -199,7 +220,7 @@ export class RaftNode implements RpcHandler {
         return this.log[p].term;
     }
 
-    private entryAt(absIndex: number): LogEntry | undefined {
+    private entryAt(absIndex: number): LogEntry<C> | undefined {
         const p = this.pos(absIndex);
         if (p < 0 || p >= this.log.length) return undefined;
         return this.log[p];
@@ -229,7 +250,7 @@ export class RaftNode implements RpcHandler {
         // Restore a snapshot first (rebuilds the state machine), then the log.
         const snap = this.storage.loadSnapshot();
         if (snap) {
-            this.stateMachine.restore(snap.data as RsmSnapshot);
+            this.rsm.restore(snap.data as RsmSnapshot<T>);
             this.lastIncludedIndex = snap.lastIncludedIndex;
             this.lastIncludedTerm = snap.lastIncludedTerm;
             this.commitIndex = snap.lastIncludedIndex;
@@ -267,9 +288,12 @@ export class RaftNode implements RpcHandler {
         const persistedBase = persisted.baseIndex ?? 0;
         const persistedBaseTerm = persisted.baseTerm ?? 0;
 
+        // The persisted log crosses the (untyped JSON) storage boundary, so cast
+        // it back to this node's application command type.
+        const persistedLog = persisted.log as LogEntry<C>[];
         if (persistedBase >= this.lastIncludedIndex) {
             // Log is aligned with, or newer than, the snapshot — trust it as-is.
-            this.log = persisted.log;
+            this.log = persistedLog;
             this.lastIncludedIndex = persistedBase;
             this.lastIncludedTerm = persistedBaseTerm;
             return;
@@ -279,7 +303,7 @@ export class RaftNode implements RpcHandler {
         // landed but before the log was compacted). Drop entries the snapshot now
         // covers, keeping only the tail strictly after `lastIncludedIndex`.
         const tailStart = this.lastIncludedIndex - persistedBase + 1;
-        const tail = persisted.log.slice(tailStart);
+        const tail = persistedLog.slice(tailStart);
         this.log = [{ term: this.lastIncludedTerm, command: { type: 'NOOP' } }, ...tail];
         this.logger?.warn('reconciled stale log against newer snapshot', {
             persistedBase,
@@ -314,6 +338,11 @@ export class RaftNode implements RpcHandler {
         return this.role === 'leader';
     }
 
+    /** The replicated state machine wrapper (audit, idempotency, snapshots, size). */
+    get stateMachine(): ReplicatedStateMachine<C, T> {
+        return this.rsm;
+    }
+
     status() {
         return {
             id: this.id,
@@ -325,8 +354,8 @@ export class RaftNode implements RpcHandler {
             snapshotIndex: this.lastIncludedIndex,
             commitIndex: this.commitIndex,
             lastApplied: this.lastApplied,
-            books: this.stateMachine.size(),
-            dedupCacheSize: this.stateMachine.dedupCacheSize(),
+            stateSize: this.rsm.size(),
+            dedupCacheSize: this.rsm.dedupCacheSize(),
             members: [...this.members.keys()],
         };
     }
@@ -350,17 +379,17 @@ export class RaftNode implements RpcHandler {
      * Propose a command. Resolves once the entry is committed and applied, and
      * rejects with {@link NotLeaderError} if this node is not the leader.
      */
-    submit(command: Command, meta?: CommandMeta): Promise<ApplyResult> {
+    submit(command: C, meta?: CommandMeta): Promise<ApplyResult<T>> {
         if (this.role !== 'leader') return Promise.reject(new NotLeaderError(this.leaderId));
 
-        const entry: LogEntry = { term: this.currentTerm, command, meta };
+        const entry: LogEntry<C> = { term: this.currentTerm, command, meta };
         this.log.push(entry);
         this.persist();
         const index = this.lastLogIndex();
         this.matchIndex.set(this.id, index);
         this.logger?.debug('proposed command', { index, type: command.type, requestId: meta?.requestId });
 
-        const promise = new Promise<ApplyResult>((resolve, reject) => {
+        const promise = new Promise<ApplyResult<T>>((resolve, reject) => {
             this.pending.set(index, { term: entry.term, resolve, reject });
         });
 
@@ -378,7 +407,7 @@ export class RaftNode implements RpcHandler {
      * is appended as a CONFIG entry and adopted immediately; the returned promise
      * resolves once that entry commits. Leader-only.
      */
-    changeMembership(change: { add?: PeerInfo; remove?: string }, meta?: CommandMeta): Promise<ApplyResult> {
+    changeMembership(change: { add?: PeerInfo; remove?: string }, meta?: CommandMeta): Promise<ApplyResult<T>> {
         if (this.role !== 'leader') throw new NotLeaderError(this.leaderId);
         // One change at a time: refuse while a previous change is still uncommitted.
         if (this.hasUncommittedConfig()) {
@@ -407,8 +436,8 @@ export class RaftNode implements RpcHandler {
     }
 
     /** Append a CONFIG entry, adopt it immediately, and replicate it. */
-    private submitConfig(members: PeerInfo[], meta?: CommandMeta): Promise<ApplyResult> {
-        const entry: LogEntry = { term: this.currentTerm, command: { type: 'CONFIG', members }, meta };
+    private submitConfig(members: PeerInfo[], meta?: CommandMeta): Promise<ApplyResult<T>> {
+        const entry: LogEntry<C> = { term: this.currentTerm, command: { type: 'CONFIG', members }, meta };
         this.log.push(entry);
         // Adopt the new configuration the instant it is in the log (Raft §4.1).
         this.recomputeMembers();
@@ -418,7 +447,7 @@ export class RaftNode implements RpcHandler {
         this.nextIndex.set(this.id, index + 1);
         this.logger?.info('membership change proposed', { index, members: members.map((m) => m.id) });
 
-        const promise = new Promise<ApplyResult>((resolve, reject) => {
+        const promise = new Promise<ApplyResult<T>>((resolve, reject) => {
             this.pending.set(index, { term: entry.term, resolve, reject });
         });
         this.advanceCommitIndex();
@@ -706,7 +735,7 @@ export class RaftNode implements RpcHandler {
             lastIncludedIndex: snapIndex,
             lastIncludedTerm: durable?.lastIncludedTerm ?? this.lastIncludedTerm,
             members: durable?.members ?? this.configAt(snapIndex),
-            data: durable?.data ?? this.stateMachine.snapshot(),
+            data: durable?.data ?? this.rsm.snapshot(),
         };
         this.logger?.info('sending snapshot', { peer: peer.id, lastIncludedIndex: snapIndex });
 
@@ -756,10 +785,12 @@ export class RaftNode implements RpcHandler {
             };
         }
 
-        // Append new entries, overwriting any conflicting suffix.
+        // Append new entries, overwriting any conflicting suffix. Entries arrive
+        // as JSON over the (untyped) transport, so cast them back to this node's
+        // application command type at the boundary.
         let p = this.pos(args.prevLogIndex + 1);
         let mutated = false;
-        for (const entry of args.entries) {
+        for (const entry of args.entries as LogEntry<C>[]) {
             const existing = this.log[p];
             if (existing && existing.term !== entry.term) {
                 this.log.length = p; // truncate conflicting tail
@@ -800,7 +831,7 @@ export class RaftNode implements RpcHandler {
             return { term: this.currentTerm };
         }
 
-        this.stateMachine.restore(args.data as RsmSnapshot);
+        this.rsm.restore(args.data as RsmSnapshot<T>);
 
         // Raft figure 13, step 6: if we already have the entry at the snapshot's
         // last-included index with a matching term, the snapshot is just a prefix
@@ -857,7 +888,7 @@ export class RaftNode implements RpcHandler {
         while (this.lastApplied < this.commitIndex) {
             this.lastApplied += 1;
             const entry = this.entryAt(this.lastApplied)!;
-            const result = this.stateMachine.apply(this.lastApplied, entry);
+            const result = this.rsm.apply(this.lastApplied, entry);
 
             const waiter = this.pending.get(this.lastApplied);
             if (waiter) {
@@ -887,7 +918,7 @@ export class RaftNode implements RpcHandler {
     private takeSnapshot(): void {
         const snapIndex = this.lastApplied;
         const snapTerm = this.termAt(snapIndex)!;
-        const data = this.stateMachine.snapshot();
+        const data = this.rsm.snapshot();
         // Capture the configuration at the snapshot point before compacting — the
         // CONFIG entries that produced it are about to be discarded.
         const members = this.configAt(snapIndex);
@@ -948,9 +979,9 @@ export class RaftNode implements RpcHandler {
         m.raftLastApplied.set(this.lastApplied, { node });
         m.raftLogLength.set(this.log.length - 1, { node });
         m.raftSnapshotIndex.set(this.lastIncludedIndex, { node });
-        m.raftDedupCacheSize.set(this.stateMachine.dedupCacheSize(), { node });
+        m.raftDedupCacheSize.set(this.rsm.dedupCacheSize(), { node });
         m.raftClusterSize.set(this.members.size, { node });
-        m.booksTotal.set(this.stateMachine.size(), { node });
+        m.stateMachineEntries.set(this.rsm.size(), { node });
         // Rebuild the per-peer lag series each scrape so a removed peer (or one we
         // no longer lead) doesn't leave a stale gauge behind forever.
         m.raftReplicationLag.reset();

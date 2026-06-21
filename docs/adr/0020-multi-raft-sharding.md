@@ -1,11 +1,11 @@
-# 0019. Multi-Raft sharding for write scaling
+# 0020. Multi-Raft sharding for write scaling
 
 - Status: Proposed
 - Date: 2026-06-21
 
 ## Context
 
-ADR-0018 pillar 4 names a hard limit of the prototype: **all writes serialize
+ADR-0019 pillar 4 names a hard limit of the prototype: **all writes serialize
 through a single Raft leader.** One leader orders every committed entry, so write
 throughput is bounded by one node, and the entire state must fit on every member.
 M6 (CQRS read projections) and M8 (pluggable key-oriented state store) scale
@@ -102,7 +102,7 @@ additively on the existing consensus core and runtime (no changes to `RaftNode`)
   range keeps locality but risks hotspots. The prototype uses a simple,
   configurable map and treats the choice as orthogonal.
 
-## Prototype scope (tracked under ADR-0018 milestone M10)
+## Prototype scope (tracked under ADR-0019 milestone M10)
 
 A runtime-level prototype: a deterministic `ShardRouter` over N independent
 in-process groups, a `Saga` coordinator with compensations, and a demonstrated

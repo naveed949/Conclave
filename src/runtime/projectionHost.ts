@@ -2,7 +2,7 @@ import { canonicalJson } from './canonical';
 import { ProjectionDefinition, ProjectionEvent } from './projection';
 
 /**
- * The READ side of CQRS (ADR-0018 pillar 4). A registry of projections plus their
+ * The READ side of CQRS (ADR-0019 pillar 4). A registry of projections plus their
  * live, folded views, fed by the stream of committed module commands.
  *
  * It is architecturally SEPARATE from the authoritative state:

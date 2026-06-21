@@ -1,34 +1,33 @@
-import { RaftNode } from '../../src/consensus/raftNode';
 import { ApplyResult, CommandMeta } from '../../src/consensus/types';
 import { buildModuleCommand } from '../../src/runtime/command';
 import { accounts } from '../../src/runtime/modules/accounts';
 import { runSaga, SagaStep } from '../../src/runtime/saga';
 import { ShardRouter } from '../../src/runtime/shardRouter';
-import { buildCluster, leaders, waitFor } from '../helpers';
+import { ModuleAppCommand } from '../../src/runtime/types';
+import { buildModuleCluster, leaders, ModuleNode, waitFor } from '../helpers';
 
 /**
- * M10 (ADR-0019): write scaling via multiple INDEPENDENT Raft groups (shards), a
+ * M10 (ADR-0020): write scaling via multiple INDEPENDENT Raft groups (shards), a
  * deterministic shard router, and cross-shard transactions via a saga
  * (try/compensate). Each shard is an ordinary `buildCluster(3)`, so per-shard
  * correctness from M1-M9 is unchanged; cross-shard atomicity is by COMPENSATION,
  * not isolation.
  */
-describe('Multi-Raft sharding (ADR-0019)', () => {
+describe('Multi-Raft sharding (ADR-0020)', () => {
     // Two genuinely independent clusters: each buildCluster makes its own
     // registry + transport, so the shards share nothing but the router's view.
-    let shardA: RaftNode[];
-    let shardB: RaftNode[];
-    let router: ShardRouter;
+    let shardA: ModuleNode[];
+    let shardB: ModuleNode[];
+    let router: ShardRouter<ModuleAppCommand>;
 
     /** All nodes across all shards, for blanket replication asserts + teardown. */
-    const allNodes = (): RaftNode[] => [...shardA, ...shardB];
+    const allNodes = (): ModuleNode[] => [...shardA, ...shardB];
 
     beforeEach(async () => {
-        shardA = buildCluster(3);
-        shardB = buildCluster(3);
-        // Register the keyed `accounts` module on EVERY node BEFORE start, so each
-        // node's embedded ModuleHost applies MODULE entries identically.
-        allNodes().forEach((n) => n.stateMachine.registerModules([accounts]));
+        // Each shard is its own independent cluster running the keyed `accounts`
+        // module, so a MODULE command applies identically within each group.
+        shardA = buildModuleCluster(3, [accounts]);
+        shardB = buildModuleCluster(3, [accounts]);
         allNodes().forEach((n) => n.start());
 
         router = new ShardRouter([{ nodes: shardA }, { nodes: shardB }]);
@@ -62,7 +61,8 @@ describe('Multi-Raft sharding (ADR-0019)', () => {
         input: unknown,
         requestId: string,
     ): Promise<ApplyResult> => {
-        const res = await router.submit(key, buildModuleCommand(module, command, input), meta(requestId));
+        const m = meta(requestId);
+        const res = await router.submit(key, buildModuleCommand(module, command, input, m), m);
         if (res.status !== 200) {
             throw new Error(`command ${module}.${command} failed (${res.status}): ${res.message}`);
         }
@@ -70,8 +70,8 @@ describe('Multi-Raft sharding (ADR-0019)', () => {
     };
 
     /** Balance of `id` as seen by `node` (undefined if the account is unknown). */
-    const balanceOn = (node: RaftNode, id: string): number | undefined =>
-        node.stateMachine.moduleQuery('accounts', 'balance', { id }) as number | undefined;
+    const balanceOn = (node: ModuleNode, id: string): number | undefined =>
+        node.app.host.query('accounts', 'balance', { id }) as number | undefined;
 
     /**
      * Pick two account ids that the router maps to DIFFERENT shards, so each demo

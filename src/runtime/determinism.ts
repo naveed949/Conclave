@@ -1,5 +1,5 @@
 /**
- * Determinism lint + size accounting (ADR-0018 pillar 2 "determinism as a
+ * Determinism lint + size accounting (ADR-0019 pillar 2 "determinism as a
  * guarantee, not a convention", and pillar 6 "resource safety / gas").
  *
  * Pillar 2 calls for turning the *convention* "reducers must be pure" into an
@@ -90,7 +90,7 @@ export const BANNED: { pattern: RegExp; reason: string }[] = [
  * a banned token in a string/comment. It catches the COMMON footgun — a reducer
  * author reflexively reaching for `Date.now()` or `Math.random()` — at zero
  * runtime cost. It is NOT a security boundary; the real boundary (a `vm`/worker
- * sandbox with frozen globals) is deferred per ADR-0018.
+ * sandbox with frozen globals) is deferred per ADR-0019.
  *
  * SCOPE: this lint deliberately covers COMMAND REDUCERS only — they are the code
  * on the convergence path, run on every replica for every command. It is NOT

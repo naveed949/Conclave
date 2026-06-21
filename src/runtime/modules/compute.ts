@@ -1,7 +1,7 @@
 import { defineModule } from '../defineModule';
 
 /**
- * A demo SANDBOXED whole-state module (ADR-0018 pillars 2, 6 — M9). Defined with
+ * A demo SANDBOXED whole-state module (ADR-0019 pillars 2, 6 — M9). Defined with
  * `{ sandbox: true }`, so the host re-compiles each reducer into a frozen `vm`
  * context at registration: the reducers below run with NO ambient `Date`,
  * `Math.random`, `crypto`, timers, etc. — determinism is enforced STRUCTURALLY,

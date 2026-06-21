@@ -1,5 +1,5 @@
 /**
- * Pluggable, key-oriented state store (ADR-0018 pillar 4, the "state larger than
+ * Pluggable, key-oriented state store (ADR-0019 pillar 4, the "state larger than
  * RAM" half).
  *
  * The existing module model (`defineModule`) treats a module's state as ONE
@@ -144,7 +144,7 @@ export class MemoryStateStore implements StateStore {
 
 /**
  * A transactional COPY-ON-WRITE view over a `StateStore`, handed to a keyed
- * reducer (ADR-0018 pillar 4). The atomicity story mirrors what whole-state
+ * reducer (ADR-0019 pillar 4). The atomicity story mirrors what whole-state
  * modules get from the host's clone-and-swap: nothing the reducer writes touches
  * the underlying store until the host explicitly `commit()`s, and a reducer that
  * throws (or is rejected by a budget/lint check) is simply discarded — the view

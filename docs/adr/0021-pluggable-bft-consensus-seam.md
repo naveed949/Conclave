@@ -1,13 +1,13 @@
-# 0020. Pluggable BFT consensus — the seam, and why it is not built
+# 0021. Pluggable BFT consensus — the seam, and why it is not built
 
 - Status: Proposed
 - Date: 2026-06-21
 
 ## Context
 
-ADR-0017 established that this framework is **Crash-Fault-Tolerant (CFT)**, not
+ADR-0018 established that this framework is **Crash-Fault-Tolerant (CFT)**, not
 **Byzantine-Fault-Tolerant (BFT)**: Raft assumes peers are honest-but-may-crash.
-ADR-0018 (pillar 7) listed an "optional BFT consensus swap behind the existing
+ADR-0019 (pillar 7) listed an "optional BFT consensus swap behind the existing
 consensus seam" as a way to extend the system to **multi-party trustlessness**
 (mutually-distrusting operators) when a single trust domain is not enough. M7
 (signed commands) already added per-actor accountability, but it does not make
@@ -20,7 +20,7 @@ codebase, and records the decision **not** to build it in the prototype.
 
 ## The honest state of the "seam"
 
-ADR-0018 implies BFT could drop in "behind the existing consensus seam." On
+ADR-0019 implies BFT could drop in "behind the existing consensus seam." On
 inspection that is optimistic. The current seam is the `Transport` interface
 (`src/consensus/transport.ts`), whose methods are **Raft-specific**:
 `sendRequestVote`, `sendAppendEntries`, `sendInstallSnapshot`. A BFT protocol
@@ -53,7 +53,7 @@ pluggability point.
    state machine, the Merkle audit (M3), the canonical serialization (M5), and the
    leader-resolved-seed discipline are all consensus-agnostic — they work
    identically under BFT, because they only assume a committed, totally-ordered
-   command log. This is the payoff of the core/edge split (ADR-0018): the *edge*
+   command log. This is the payoff of the core/edge split (ADR-0019): the *edge*
    and *core* do not change when the *ordering* protocol does.
 4. **Treat BFT as a distinct project** gated on a real multi-party requirement,
    not a milestone of this prototype.
@@ -67,23 +67,25 @@ pluggability point.
 - The work that *does* port — determinism, audit, signing, the core/edge split —
   is already done and validated, so a future BFT effort starts from a clean
   log-contract boundary rather than a rewrite of the runtime.
-- Documents a real correction to ADR-0018's "swap behind the existing seam"
+- Documents a real correction to ADR-0019's "swap behind the existing seam"
   framing, so future readers aren't misled into thinking it's a `Transport` swap.
 
 ### Negative
 
 - The system remains single-trust-domain (CFT) — unsuitable for adversarial,
-  multi-organization deployments, exactly as ADR-0017 concluded.
-- The `Consensus` interface is named but not yet extracted; `RaftNode` is still
-  referenced directly in a few places (e.g. `ShardRouter`, controllers), so a real
-  swap would first require that refactor.
+  multi-organization deployments, exactly as ADR-0018 concluded.
+- The application boundary *below* the log — the `StateMachine` interface — is now
+  extracted (ADR-0017), so applications already plug in cleanly. But the ordering
+  boundary *above* the log (a `Consensus` interface a BFT engine would implement)
+  is still not extracted: `RaftNode` is referenced directly (e.g. `ShardRouter`,
+  controllers), so a real BFT swap would first require that second refactor.
 
 ## Alternatives considered
 
 - **Build a minimal PBFT/Tendermint engine now.** Rejected: thousands of lines,
   a different protocol with view-changes and `3f+1` quorums, and high risk of
   subtle safety bugs — not a prototype increment, and dangerous to ship half-done.
-- **Claim the `Transport` interface is the BFT seam (as ADR-0018 implied).**
+- **Claim the `Transport` interface is the BFT seam (as ADR-0019 implied).**
   Rejected as inaccurate: BFT does not use Raft's RPCs; pretending otherwise would
   mislead.
 - **Adopt an external BFT platform (Tendermint/CometBFT, HotStuff) and run the

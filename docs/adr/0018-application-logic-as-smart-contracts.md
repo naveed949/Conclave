@@ -1,4 +1,4 @@
-# 0017. Deploying application logic as smart contracts on this framework
+# 0018. Deploying application logic as smart contracts on this framework
 
 - Status: Proposed
 - Date: 2026-06-20

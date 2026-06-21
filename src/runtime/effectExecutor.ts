@@ -2,7 +2,7 @@ import { resolveSeed } from './context';
 import { EffectHandler, EffectIntent, EffectResultEntry } from './types';
 
 /**
- * The effectful EDGE of the core/edge split (ADR-0018 pillar 3). The deterministic
+ * The effectful EDGE of the core/edge split (ADR-0019 pillar 3). The deterministic
  * core records `pending` effects in its outbox; this executor runs them post-commit
  * — the ONE non-deterministic actor in the system — and feeds each outcome back as
  * a committed `EffectResultEntry` that replicas apply identically.

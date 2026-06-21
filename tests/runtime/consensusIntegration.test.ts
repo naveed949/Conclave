@@ -1,25 +1,23 @@
-import { RaftNode } from '../../src/consensus/raftNode';
 import { CommandMeta } from '../../src/consensus/types';
 import { buildModuleCommand } from '../../src/runtime/command';
 import { counter } from '../../src/runtime/modules/counter';
 import { notes } from '../../src/runtime/modules/notes';
-import { buildCluster, leaders, waitFor } from '../helpers';
+import { buildModuleCluster, leaders, ModuleNode, waitFor } from '../helpers';
 
 /**
- * M4: a generic MODULE command flows through REAL Raft. The leader resolves the
- * seed up front (via `buildModuleCommand`), the command replicates as a log
- * entry, and every node applies it to its embedded ModuleHost — converging on
- * identical module state AND identical Merkle audit roots, with idempotency and
- * leader-resolved seeds carried through the log.
+ * M4: the module runtime rides REAL Raft as a pluggable application state machine
+ * (ADR-0017 seam). The leader resolves the seed up front (via `buildModuleCommand`),
+ * the command replicates as an ordinary application log entry, and every node
+ * applies it to its own `ModuleStateMachine`/`ModuleHost` — converging on identical
+ * module state AND identical Merkle audit roots, with idempotency (substrate dedup)
+ * and leader-resolved seeds carried through the log.
  */
 describe('Module commands over Raft consensus', () => {
-    let nodes: RaftNode[];
+    let nodes: ModuleNode[];
 
     beforeEach(() => {
-        nodes = buildCluster(3);
-        // Register the SAME modules on every node BEFORE start, so each node's
-        // embedded ModuleHost can apply MODULE entries identically.
-        nodes.forEach((n) => n.stateMachine.registerModules([counter, notes]));
+        // Each node gets its own ModuleStateMachine registered with the same modules.
+        nodes = buildModuleCluster(3, [counter, notes]);
         nodes.forEach((n) => n.start());
     });
 
@@ -36,7 +34,7 @@ describe('Module commands over Raft consensus', () => {
             actor: 'alice',
             timestamp: new Date().toISOString(),
         };
-        const incResult = await leader.submit(buildModuleCommand('counter', 'increment', { by: 5 }), incMeta);
+        const incResult = await leader.submit(buildModuleCommand('counter', 'increment', { by: 5 }, incMeta), incMeta);
         expect(incResult.status).toBe(200);
 
         const noteMeta: CommandMeta = {
@@ -44,7 +42,7 @@ describe('Module commands over Raft consensus', () => {
             actor: 'bob',
             timestamp: new Date().toISOString(),
         };
-        const noteResult = await leader.submit(buildModuleCommand('notes', 'create', { text: 'hello' }), noteMeta);
+        const noteResult = await leader.submit(buildModuleCommand('notes', 'create', { text: 'hello' }, noteMeta), noteMeta);
         expect(noteResult.status).toBe(200);
 
         // Wait for replication of BOTH commands: gate on the LAST submitted entry
@@ -53,19 +51,19 @@ describe('Module commands over Raft consensus', () => {
         await waitFor(() =>
             nodes.every(
                 (n) =>
-                    n.stateMachine.moduleQuery('counter', 'value') === 5 &&
-                    (n.stateMachine.moduleQuery('notes', 'list') as unknown[]).length === 1,
+                    n.app.host.query('counter', 'value') === 5 &&
+                    (n.app.host.query('notes', 'list') as unknown[]).length === 1,
             ),
         );
 
         // All three nodes converge on identical module state AND audit root.
-        const counterValues = new Set(nodes.map((n) => n.stateMachine.moduleQuery('counter', 'value')));
+        const counterValues = new Set(nodes.map((n) => n.app.host.query('counter', 'value')));
         expect(counterValues).toEqual(new Set([5]));
 
-        const noteLists = nodes.map((n) => JSON.stringify(n.stateMachine.moduleState('notes')));
+        const noteLists = nodes.map((n) => JSON.stringify(n.app.host.getState('notes')));
         expect(new Set(noteLists).size).toBe(1);
 
-        const auditRoots = new Set(nodes.map((n) => n.stateMachine.moduleAuditRoot()));
+        const auditRoots = new Set(nodes.map((n) => n.app.host.auditRoot()));
         expect(auditRoots.size).toBe(1);
     });
 
@@ -79,17 +77,17 @@ describe('Module commands over Raft consensus', () => {
             timestamp: new Date().toISOString(),
         };
 
-        await leader.submit(buildModuleCommand('counter', 'increment', { by: 3 }), meta);
-        await waitFor(() => nodes.every((n) => n.stateMachine.moduleQuery('counter', 'value') === 3));
+        await leader.submit(buildModuleCommand('counter', 'increment', { by: 3 }, meta), meta);
+        await waitFor(() => nodes.every((n) => n.app.host.query('counter', 'value') === 3));
 
-        // Re-submit with the SAME requestId: the dedup cache returns the cached
-        // result without re-running the reducer, so the counter must NOT advance.
-        await leader.submit(buildModuleCommand('counter', 'increment', { by: 3 }), meta);
+        // Re-submit with the SAME requestId: the substrate dedup cache returns the
+        // cached result without re-running the reducer, so the counter must NOT advance.
+        await leader.submit(buildModuleCommand('counter', 'increment', { by: 3 }, meta), meta);
 
         // Give the second command a chance to commit/apply, then assert no change.
         await waitFor(() => leader.status().lastApplied >= 0); // settle
         await new Promise((r) => setTimeout(r, 50));
-        const values = new Set(nodes.map((n) => n.stateMachine.moduleQuery('counter', 'value')));
+        const values = new Set(nodes.map((n) => n.app.host.query('counter', 'value')));
         expect(values).toEqual(new Set([3]));
     });
 
@@ -102,11 +100,11 @@ describe('Module commands over Raft consensus', () => {
             actor: 'carol',
             timestamp: new Date().toISOString(),
         };
-        await leader.submit(buildModuleCommand('notes', 'create', { text: 'seeded' }), meta);
+        await leader.submit(buildModuleCommand('notes', 'create', { text: 'seeded' }, meta), meta);
 
         await waitFor(() =>
             nodes.every((n) => {
-                const list = n.stateMachine.moduleQuery('notes', 'list') as Array<{ id: string }>;
+                const list = n.app.host.query('notes', 'list') as Array<{ id: string }>;
                 return list.length === 1;
             }),
         );
@@ -114,10 +112,10 @@ describe('Module commands over Raft consensus', () => {
         // The note's id and createdAt come from ctx, derived from the seed baked
         // into the log on the leader. If each node resolved its own seed, these
         // would differ — identical values prove the seed flowed through the log.
-        const noteJsons = nodes.map((n) => JSON.stringify(n.stateMachine.moduleQuery('notes', 'list')));
+        const noteJsons = nodes.map((n) => JSON.stringify(n.app.host.query('notes', 'list')));
         expect(new Set(noteJsons).size).toBe(1);
 
-        const firstList = nodes[0].stateMachine.moduleQuery('notes', 'list') as Array<{ id: string; createdAt: string }>;
+        const firstList = nodes[0].app.host.query('notes', 'list') as Array<{ id: string; createdAt: string }>;
         expect(firstList[0].id).toBeTruthy();
         expect(firstList[0].createdAt).toBeTruthy();
     });

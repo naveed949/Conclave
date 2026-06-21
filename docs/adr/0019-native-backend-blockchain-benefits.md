@@ -1,11 +1,11 @@
-# 0018. Bringing blockchain benefits to backend development natively
+# 0019. Bringing blockchain benefits to backend development natively
 
 - Status: Proposed
 - Date: 2026-06-20
 
 ## Context
 
-ADR-0017 concluded that this framework provides the *form* of smart contracts
+ADR-0018 concluded that this framework provides the *form* of smart contracts
 (deterministic, replicated, audited execution) but not the *substance* of
 trustlessness, and is best scoped to a single trust domain (CFT, not BFT). It
 also enumerated the gaps that make "application logic as contracts" awkward for
@@ -44,7 +44,7 @@ the foundation this builds on.
 ## Decision
 
 Adopt a layered "deterministic core + effectful edge" architecture and evolve the
-framework along the following pillars. Each closes a specific ADR-0017 gap while
+framework along the following pillars. Each closes a specific ADR-0018 gap while
 preserving a backend principle.
 
 1. **Module SDK (developer productivity).** Replace the four-touchpoint workflow
@@ -87,7 +87,7 @@ preserving a backend principle.
    chain with a Merkle tree/accumulator (O(log n) inclusion proofs and a compact
    root that can be externally anchored), and record a hash of the deployed module
    code in a `DEPLOY` log entry referenced by each command's meta — so the audit
-   proves *which logic version* produced each result, closing ADR-0017's
+   proves *which logic version* produced each result, closing ADR-0018's
    data-but-not-logic gap.
 
 6. **Resource safety (gas analog).** Bound reducer execution with a deterministic
@@ -144,7 +144,7 @@ preserving a backend principle.
 
 ## Alternatives considered
 
-- **Keep the framework as a focused POC and document the gaps only (ADR-0017).**
+- **Keep the framework as a focused POC and document the gaps only (ADR-0018).**
   Lowest effort, but leaves the framework unusable for mainstream backend work;
   this ADR is the constructive counterpart.
 - **Adopt an existing platform instead of evolving this one** — an event-sourcing
@@ -182,12 +182,12 @@ the consensus core; M4–M7 wire it into real Raft and harden it.
   accumulator with O(log n) inclusion proofs and a domain-separated root, plus a
   per-command module code-version hash so the audit proves which logic version
   produced each result.
-- **M4 — Consensus wiring (pillars 1–3 end-to-end).** A generic `MODULE` command
-  in the consensus `Command` union (carrying a leader-resolved seed) routes
-  through `ReplicatedStateMachine` to an embedded `ModuleHost`. A 3-node cluster
-  converges on identical module state *and* Merkle audit root, with MODULE
-  idempotency and the seed flowing through the log. The non-MODULE (book) path is
-  byte-for-byte unchanged.
+- **M4 — Consensus wiring (pillars 1–3 end-to-end).** The runtime plugs into the
+  pluggable `StateMachine` seam (ADR-0017): a `ModuleStateMachine` adapts the
+  `ModuleHost` so a `ModuleAppCommand` (carrying a leader-resolved seed) is an
+  ordinary application command — no bespoke consensus-core support. A 3-node
+  cluster converges on identical module state *and* Merkle audit root, with
+  substrate idempotency and the seed flowing through the log.
 - **M5 — Determinism enforcement + resource bounds (pillars 2, 6).** A static
   determinism lint rejects reducers that touch non-deterministic globals
   (`defineModule` strict-by-default), and a deterministic `413` resource bound
@@ -218,7 +218,7 @@ the consensus core; M4–M7 wire it into real Raft and harden it.
   (deterministic); a leader-side `admit()` dry-runs with a `vm` wall-clock timeout
   to reject runaways before they enter the log (the gas/CFT model). Honestly
   scoped: `vm` is a determinism aid, not a security boundary.
-- **M10 — Multi-Raft sharding (pillar 4, write scaling; see ADR-0019).** Multiple
+- **M10 — Multi-Raft sharding (pillar 4, write scaling; see ADR-0020).** Multiple
   independent Raft groups (shards) with a deterministic `sha256(key) mod N` shard
   router, so writes to different shards commit in parallel and state is
   partitioned. Cross-shard transactions use a saga (try/compensate) — atomicity by
@@ -229,7 +229,7 @@ the consensus core; M4–M7 wire it into real Raft and harden it.
 **Remaining frontier:** an optional **BFT consensus swap** (pillar 7) for
 multi-party trustlessness beyond the single trust domain. This is a protocol-level
 replacement (different messages, `3f+1` quorums, signed votes) well beyond a
-prototype increment; **ADR-0020** records the honest design, the real seam (the
+prototype increment; **ADR-0021** records the honest design, the real seam (the
 commit-ordered-log contract above the log, not the Raft `Transport`), and why it
 is deliberately not built. Everything that ports unchanged under BFT — the
 deterministic state machine, Merkle audit, signing, and the core/edge split — is

@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { canonicalJson } from './canonical';
 
 /**
- * Merkle accumulator audit (ADR-0018 pillar 5). Upgrades the consensus core's
+ * Merkle accumulator audit (ADR-0019 pillar 5). Upgrades the consensus core's
  * LINEAR hash chain (`replicatedStateMachine.ts`) to a Merkle tree: instead of
  * an O(n) walk to prove an entry, a verifier needs only a compact root plus an
  * O(log n) sibling path. The root is a single hash that can be externally
@@ -20,7 +20,7 @@ import { canonicalJson } from './canonical';
  * One audited fact: which logic version (`codeHash`) produced which result
  * (`status`) for which command, and on whose behalf. `seq` is the leaf's index
  * in the accumulator (and its position in the tree). `codeHash` is what closes
- * ADR-0017's "data but not logic" gap — see {@link moduleCodeHash}.
+ * ADR-0018's "data but not logic" gap — see {@link moduleCodeHash}.
  */
 export interface AuditLeaf {
     seq: number;

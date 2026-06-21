@@ -1,15 +1,17 @@
 import { Request, Response } from 'express';
-import { RaftNode, NotLeaderError } from '../consensus/raftNode';
-import { Command, CommandMeta } from '../consensus/types';
+import { NotLeaderError } from '../consensus/raftNode';
+import { CommandMeta } from '../consensus/types';
 import { getContext } from '../platform/requestContext';
 import { forwardToLeader, isForwarded } from '../platform/forward';
 import {
+    BookCommand,
     buildAddCommand,
     buildBorrowCommand,
     buildDeleteCommand,
     buildReturnCommand,
     buildUpdateCommand,
 } from '../models/book';
+import { BookNode } from '../models/bookStateMachine';
 
 /** A linearizable read is requested via `?consistency=strong` or `X-Consistency: strong`. */
 function wantsStrongRead(req: Request): boolean {
@@ -24,7 +26,7 @@ function wantsStrongRead(req: Request): boolean {
  * via the leader; a follower transparently forwards writes (and strong reads)
  * to the leader (falling back to 421 if the leader is unknown/unreachable).
  */
-export function createBookController(node: RaftNode) {
+export function createBookController(node: BookNode) {
     // Forward to the leader (or reply 421) when this node isn't the leader.
     const onNotLeader = async (req: Request, res: Response, err: NotLeaderError): Promise<void> => {
         const leaderUrl = node.getLeaderUrl();
@@ -35,14 +37,14 @@ export function createBookController(node: RaftNode) {
         res.status(421).json({ message: 'Not the leader — retry against the leader', leader: err.leaderId });
     };
 
-    const propose = async (req: Request, res: Response, build: () => Command) => {
+    const propose = async (req: Request, res: Response, build: () => BookCommand) => {
         const ctx = getContext();
         const meta: CommandMeta | undefined = ctx
             ? { requestId: ctx.requestId, actor: ctx.actor, timestamp: new Date().toISOString() }
             : undefined;
         try {
             const result = await node.submit(build(), meta);
-            if (result.book) res.status(result.status).json(result.book);
+            if (result.data) res.status(result.status).json(result.data);
             else res.status(result.status).json({ message: result.message });
         } catch (err) {
             if (err instanceof NotLeaderError) return onNotLeader(req, res, err);
@@ -65,14 +67,14 @@ export function createBookController(node: RaftNode) {
 
     return {
         getBooks: async (req: Request, res: Response): Promise<void> => {
-            const serve = () => res.json(node.stateMachine.getAll());
+            const serve = () => res.json(node.app.getAll());
             if (wantsStrongRead(req)) return strongRead(req, res, serve);
             serve();
         },
 
         getBook: async (req: Request, res: Response): Promise<void> => {
             const serve = () => {
-                const book = node.stateMachine.get(req.params.id);
+                const book = node.app.get(req.params.id);
                 if (!book) {
                     res.status(404).json({ message: 'Book not found' });
                     return;

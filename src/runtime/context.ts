@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'crypto';
 import { ReducerContext, Seed } from './types';
 
 /**
- * Seed resolution and deterministic context construction (ADR-0018 pillar 2).
+ * Seed resolution and deterministic context construction (ADR-0019 pillar 2).
  *
  * `resolveSeed` is the ONLY place real non-determinism enters; it runs on the
  * leader. `createContext` then rebuilds a fully deterministic `ReducerContext`

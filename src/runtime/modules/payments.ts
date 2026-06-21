@@ -27,7 +27,7 @@ interface SettleInput {
 }
 
 /**
- * A demo module for the committed-intent effect model (ADR-0018 pillar 3).
+ * A demo module for the committed-intent effect model (ADR-0019 pillar 3).
  *
  * `charge` is a pure reducer: it records the order as `pending` and EMITS an
  * effect intent rather than calling a payment gateway itself. The intent commits

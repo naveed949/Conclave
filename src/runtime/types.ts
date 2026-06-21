@@ -1,5 +1,5 @@
 /**
- * Core type definitions for the module runtime (ADR-0018, pillars 1–2).
+ * Core type definitions for the module runtime (ADR-0019, pillars 1–2).
  *
  * This layer sits ON TOP of the consensus core. Where the book demo wires
  * non-determinism out by hand in `models/book.ts`, the runtime generalizes that
@@ -11,7 +11,7 @@
  */
 
 /**
- * A declarative request for a side effect (ADR-0018 pillar 3). Reducers never
+ * A declarative request for a side effect (ADR-0019 pillar 3). Reducers never
  * perform I/O; they return intents that the host records into a deterministic
  * outbox and a post-commit `EffectExecutor` runs at the edge. The replicated log
  * thus IS a transactional outbox: the intent commits as part of the reducer's
@@ -70,7 +70,7 @@ export interface EffectResultEntry {
 }
 
 /**
- * Performs the real side effect at the edge (ADR-0018 pillar 3). This is the ONE
+ * Performs the real side effect at the edge (ADR-0019 pillar 3). This is the ONE
  * place non-determinism (network, clock, randomness) is allowed: the executor
  * runs it post-commit, off the deterministic apply path, and bakes the returned
  * value into an `EffectResultEntry` so replicas never re-run it.
@@ -125,7 +125,7 @@ export type Query<S> = (state: S, args: unknown) => unknown;
 export interface ModuleDefinition<S> {
     name: string;
     /**
-     * Semantic version of the module's LOGIC (ADR-0018 pillar 5). Optional;
+     * Semantic version of the module's LOGIC (ADR-0019 pillar 5). Optional;
      * defaults to `'0'` when unset. It participates in the module's code hash, so
      * bumping it produces a distinct `codeHash` even if the reducer source is
      * byte-identical — letting an operator force a recorded version boundary.
@@ -136,7 +136,7 @@ export interface ModuleDefinition<S> {
     commands: Record<string, Reducer<S>>;
     queries?: Record<string, Query<S>>;
     /**
-     * Opt into the `vm` determinism sandbox (ADR-0018 pillars 2, 6 — M9). OFF by
+     * Opt into the `vm` determinism sandbox (ADR-0019 pillars 2, 6 — M9). OFF by
      * default: existing whole-state modules keep their current DIRECT reducer
      * execution. When `true`, the host re-compiles each command reducer into a
      * fresh `vm` context with a frozen safe-global set (no `Date`/`Math.random`/
@@ -154,7 +154,7 @@ export interface ModuleDefinition<S> {
      */
     sandbox?: boolean;
     /**
-     * Wall-clock budget (ms) for the LEADER-SIDE admission step meter (ADR-0018
+     * Wall-clock budget (ms) for the LEADER-SIDE admission step meter (ADR-0019
      * pillar 6 "gas"). Only consulted for a `sandbox` module. The leader's
      * pre-log `admit()` dry-run runs the reducer inside the vm with this timeout
      * and rejects a runaway (e.g. an infinite loop) BEFORE it enters the log. The
@@ -186,11 +186,26 @@ export interface ModuleCommand {
     /**
      * Optional actor signature (base64) over the LOGICAL command, threaded
      * through so {@link ModuleHost.apply} can verify it against a configured
-     * `KeyRegistry` (ADR-0018 pillar 7). Excludes `seed` — the actor signs
+     * `KeyRegistry` (ADR-0019 pillar 7). Excludes `seed` — the actor signs
      * `{ module, command, input, actor, requestId }` before the leader resolves
      * the seed. Ignored when no registry is configured (back-compat).
      */
     sig?: string;
+}
+
+/**
+ * The application command the module runtime puts on the replicated log
+ * (ADR-0019 M4). It satisfies the framework's `AppCommand` contract (a string
+ * `type` discriminator — `'MODULE'`, distinct from the reserved `NOOP`/`CONFIG`)
+ * and additionally carries the `actor`/`requestId` so the `StateMachine` adapter,
+ * whose `apply(command)` receives no separate meta, can reconstruct the
+ * `(cmd, meta)` call the `ModuleHost` expects and verify the signature. These two
+ * fields MUST match the `CommandMeta` the command is submitted with.
+ */
+export interface ModuleAppCommand extends ModuleCommand {
+    type: 'MODULE';
+    actor: string;
+    requestId: string;
 }
 
 /** The outcome of applying a `ModuleCommand` to a `ModuleHost`. */
@@ -202,7 +217,7 @@ export interface ModuleApplyResult {
 }
 
 /**
- * Construction options for `ModuleHost` (ADR-0018 pillar 6 "resource safety").
+ * Construction options for `ModuleHost` (ADR-0019 pillar 6 "resource safety").
  *
  * These bound the AMPLIFICATION a single command may cause: how many effects it
  * may enqueue, and how large the next-state it may produce. They are a
@@ -211,7 +226,7 @@ export interface ModuleApplyResult {
  * output, so an over-budget command is rejected IDENTICALLY on every node and
  * the bound never causes divergence. A preemptive CPU/instruction meter (which
  * would need a vm/worker to interrupt a runaway reducer mid-execution) is
- * explicitly DEFERRED per ADR-0018; this guards the cheap, deterministic axes
+ * explicitly DEFERRED per ADR-0019; this guards the cheap, deterministic axes
  * (fan-out and state size) that can be measured purely after the reducer returns.
  */
 export interface ModuleHostOptions {
@@ -225,7 +240,7 @@ export interface ModuleHostOptions {
      * state amplification so a single command cannot bloat replicated state (and
      * thus every snapshot) without bound. Default: 64 KiB.
      *
-     * For a KEYED module (ADR-0018 pillar 4) this bounds the canonical byte size
+     * For a KEYED module (ADR-0019 pillar 4) this bounds the canonical byte size
      * of the command's BUFFERED WRITES (the records it `put`s), the keyed analog
      * of next-state amplification.
      */
@@ -240,7 +255,7 @@ export interface ModuleHostOptions {
     maxWrites?: number;
     /**
      * Default wall-clock step budget (ms) for the LEADER-SIDE admission meter
-     * (ADR-0018 pillar 6 "gas" — M9), used for a `sandbox` module that does not
+     * (ADR-0019 pillar 6 "gas" — M9), used for a `sandbox` module that does not
      * set its own `stepBudgetMs`. ONLY the leader's pre-log `admit()` dry-run uses
      * this timeout, to reject a runaway reducer before it enters the log; the
      * apply path NEVER uses a timeout (it must stay deterministic — followers

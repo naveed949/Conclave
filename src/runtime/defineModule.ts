@@ -6,7 +6,7 @@ import { ModuleDefinition } from './types';
  */
 export interface DefineModuleOptions {
     /**
-     * Enforce the determinism lint at definition time (ADR-0018 pillar 2).
+     * Enforce the determinism lint at definition time (ADR-0019 pillar 2).
      * Defaults to TRUE: a reducer that references a non-deterministic global
      * (`Date.now`, `Math.random`, `crypto`, network, timers, …) is REJECTED with
      * a thrown error before the module can ever be registered.
@@ -19,7 +19,7 @@ export interface DefineModuleOptions {
      */
     strict?: boolean;
     /**
-     * Opt into the `vm` determinism sandbox (ADR-0018 pillars 2, 6 — M9). When
+     * Opt into the `vm` determinism sandbox (ADR-0019 pillars 2, 6 — M9). When
      * set here it is stamped onto the returned definition so the host compiles the
      * reducers into a frozen `vm` context at registration. Additive and
      * default-off; the static lint stays on as defense-in-depth (a sandboxed
@@ -43,7 +43,7 @@ export interface DefineModuleOptions {
 export type LintedModuleDefinition<S> = ModuleDefinition<S> & { __lint?: string[] };
 
 /**
- * Validate and return a module definition (ADR-0018 pillar 1: the single
+ * Validate and return a module definition (ADR-0019 pillar 1: the single
  * declarative unit that replaces the four-touchpoint command workflow).
  *
  * Validation happens here, at definition time, so a malformed module fails loud
@@ -51,7 +51,7 @@ export type LintedModuleDefinition<S> = ModuleDefinition<S> & { __lint?: string[
  * function is otherwise an identity — it returns the same object, typed — which
  * keeps authoring a module a single `defineModule({ ... })` call.
  *
- * Determinism lint (ADR-0018 pillar 2): every command reducer is statically
+ * Determinism lint (ADR-0019 pillar 2): every command reducer is statically
  * linted for non-deterministic globals. With `strict` (the default), any
  * violation THROWS, turning the "reducers must be pure" convention into an
  * enforced guarantee. With `{ strict: false }` the violations are recorded on
@@ -63,7 +63,7 @@ export function defineModule<S>(
     opts: DefineModuleOptions = {},
 ): LintedModuleDefinition<S> {
     const strict = opts.strict ?? true;
-    // Stamp the sandbox opt-in (ADR-0018 M9) from the options onto the definition
+    // Stamp the sandbox opt-in (ADR-0019 M9) from the options onto the definition
     // so the host sees it at registration. A field set directly on `def` wins over
     // the option (explicit on the definition is the more specific intent); options
     // are the ergonomic place to pass it alongside `strict`.
@@ -101,7 +101,7 @@ export function defineModule<S>(
         }
     }
 
-    // Determinism lint (ADR-0018 pillar 2): scan every reducer's source for
+    // Determinism lint (ADR-0019 pillar 2): scan every reducer's source for
     // non-deterministic globals. This is the always-on static stand-in for the
     // deferred vm/worker sandbox — it catches the common footgun at definition
     // time, before a single command can be applied.
@@ -113,7 +113,7 @@ export function defineModule<S>(
     if (violations.length > 0) {
         if (strict) {
             throw new Error(
-                `Module "${def.name}" failed the determinism lint (ADR-0018 pillar 2):\n` +
+                `Module "${def.name}" failed the determinism lint (ADR-0019 pillar 2):\n` +
                     violations.map((v) => `  - ${v}`).join('\n') +
                     `\nReducers must be pure: use ctx.now / ctx.random() / ctx.id() instead of ambient ` +
                     `globals, or pass { strict: false } to defineModule for a vetted reducer.`,

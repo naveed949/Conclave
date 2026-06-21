@@ -22,7 +22,7 @@ interface NoteIndexView {
 }
 
 /**
- * A demo CQRS projection over the `notes` module (ADR-0018 pillar 4).
+ * A demo CQRS projection over the `notes` module (ADR-0019 pillar 4).
  *
  * It proves the value of the read side: a derived, indexed view that answers
  * rich queries the raw module state cannot, built purely by folding the committed

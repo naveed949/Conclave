@@ -1,16 +1,16 @@
 /**
- * Saga coordinator for cross-shard transactions (ADR-0019, M10).
+ * Saga coordinator for cross-shard transactions (ADR-0020, M10).
  *
  * A multi-Raft cluster has NO single log spanning shards, so an operation that
  * touches two shards (e.g. debit an account on shard A, credit one on shard B)
- * cannot be one atomic append. ADR-0019 chooses a SAGA over two-phase commit:
+ * cannot be one atomic append. ADR-0020 chooses a SAGA over two-phase commit:
  * run the per-shard steps forward, and if one fails, run the COMPENSATING action
  * for each step that already succeeded, in reverse order.
  *
  * This yields **atomicity by eventual compensation, NOT isolation**: intermediate
  * states are visible (the debit lands before the credit; on failure the credit
  * never happens and the debit is undone). That exposure is the accepted trade-off
- * for keeping each shard independently available (ADR-0019 "Why saga, not 2PC").
+ * for keeping each shard independently available (ADR-0020 "Why saga, not 2PC").
  *
  * Idempotency requirement: each `invoke` and each `compensate` is an ordinary,
  * single-shard MODULE command carrying a `requestId`, so the runtime's exactly-

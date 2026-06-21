@@ -1,5 +1,5 @@
 /**
- * Keyed (key-oriented, transactional) module model (ADR-0018 pillar 4, the
+ * Keyed (key-oriented, transactional) module model (ADR-0019 pillar 4, the
  * "state larger than RAM" half).
  *
  * A WHOLE-STATE module (`defineModule`) hands each reducer the entire module
@@ -61,7 +61,7 @@ export type LintedKeyedModuleDefinition = KeyedModuleDefinition & { __lint?: str
 /** Options for {@link defineKeyedModule}, mirroring `defineModule`. */
 export interface DefineKeyedModuleOptions {
     /**
-     * Enforce the determinism lint at definition time (ADR-0018 pillar 2).
+     * Enforce the determinism lint at definition time (ADR-0019 pillar 2).
      * Defaults to TRUE — identical semantics to `defineModule`: a violation
      * throws, or with `{ strict: false }` is recorded under `__lint` instead.
      */
@@ -100,7 +100,7 @@ export function defineKeyedModule(
         }
     }
 
-    // Determinism lint (ADR-0018 pillar 2) over every keyed reducer — the same
+    // Determinism lint (ADR-0019 pillar 2) over every keyed reducer — the same
     // static stand-in for the deferred sandbox that whole-state modules get.
     const violations: string[] = [];
     for (const name of commandNames) {
@@ -111,7 +111,7 @@ export function defineKeyedModule(
     if (violations.length > 0) {
         if (strict) {
             throw new Error(
-                `Module "${def.name}" failed the determinism lint (ADR-0018 pillar 2):\n` +
+                `Module "${def.name}" failed the determinism lint (ADR-0019 pillar 2):\n` +
                     violations.map((v) => `  - ${v}`).join('\n') +
                     `\nReducers must be pure: use ctx.now / ctx.random() / ctx.id() instead of ambient ` +
                     `globals, or pass { strict: false } to defineKeyedModule for a vetted reducer.`,

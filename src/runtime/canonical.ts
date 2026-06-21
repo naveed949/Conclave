@@ -1,5 +1,5 @@
 /**
- * Single shared canonical-JSON serializer (ADR-0018 runtime).
+ * Single shared canonical-JSON serializer (ADR-0019 runtime).
  *
  * Canonical JSON means: stringify with object keys recursively SORTED, so two
  * logically-equal values serialize to the SAME bytes regardless of property

@@ -1,4 +1,3 @@
-import { RaftNode } from '../../src/consensus/raftNode';
 import { CommandMeta } from '../../src/consensus/types';
 import { buildModuleCommand, buildSignedModuleCommand } from '../../src/runtime/command';
 import { ModuleHost } from '../../src/runtime/moduleHost';
@@ -10,10 +9,10 @@ import {
     SignablePayload,
     verifyCommand,
 } from '../../src/runtime/signing';
-import { buildCluster, leaders, waitFor } from '../helpers';
+import { buildModuleCluster, leaders, ModuleNode, waitFor } from '../helpers';
 
 /**
- * Milestone 7 (ADR-0018 pillar 7): actor-signed module commands. The actor signs
+ * Milestone 7 (ADR-0019 pillar 7): actor-signed module commands. The actor signs
  * the LOGICAL command (NOT the leader-resolved seed); every node verifies on the
  * apply path against an actor->public-key registry. A forged/tampered command is
  * rejected DETERMINISTICALLY (401) on every node, so a malicious leader cannot
@@ -200,15 +199,13 @@ describe('ModuleHost signature enforcement', () => {
 
 describe('signed module commands over Raft consensus', () => {
     const alice = generateActorKeypair();
-    let nodes: RaftNode[];
+    let nodes: ModuleNode[];
 
     beforeEach(() => {
-        nodes = buildCluster(3);
-        nodes.forEach((n) => {
-            n.stateMachine.registerModules([counter]);
-            // Every node configured with the SAME registry (alice's pubkey).
-            n.stateMachine.registerActorKey('alice', alice.publicKey);
-        });
+        // Every node configured with the SAME registry (alice's pubkey).
+        const reg = new KeyRegistry();
+        reg.registerActor('alice', alice.publicKey);
+        nodes = buildModuleCluster(3, [counter], { keyRegistry: reg });
         nodes.forEach((n) => n.start());
     });
 
@@ -229,10 +226,10 @@ describe('signed module commands over Raft consensus', () => {
         const res = await leader.submit(cmd, meta);
         expect(res.status).toBe(200);
 
-        await waitFor(() => nodes.every((n) => n.stateMachine.moduleQuery('counter', 'value') === 5));
-        const values = new Set(nodes.map((n) => n.stateMachine.moduleQuery('counter', 'value')));
+        await waitFor(() => nodes.every((n) => n.app.host.query('counter', 'value') === 5));
+        const values = new Set(nodes.map((n) => n.app.host.query('counter', 'value')));
         expect(values).toEqual(new Set([5]));
-        const roots = new Set(nodes.map((n) => n.stateMachine.moduleAuditRoot()));
+        const roots = new Set(nodes.map((n) => n.app.host.auditRoot()));
         expect(roots.size).toBe(1);
     });
 
@@ -255,7 +252,7 @@ describe('signed module commands over Raft consensus', () => {
 
         // Also submit an unsigned forgery for good measure.
         const unsignedMeta: CommandMeta = { requestId: 'req-unsigned', actor: 'alice', timestamp: SEED.timestamp };
-        const unsigned = buildModuleCommand('counter', 'increment', { by: 50 });
+        const unsigned = buildModuleCommand('counter', 'increment', { by: 50 }, unsignedMeta);
         const res2 = await leader.submit(unsigned, unsignedMeta);
         expect(res2.status).toBe(401);
 
@@ -266,10 +263,10 @@ describe('signed module commands over Raft consensus', () => {
                 n.stateMachine.getAuditLog().some((e) => e.requestId === 'req-unsigned'),
             ),
         );
-        const values = new Set(nodes.map((n) => n.stateMachine.moduleQuery('counter', 'value')));
+        const values = new Set(nodes.map((n) => n.app.host.query('counter', 'value')));
         expect(values).toEqual(new Set([0]));
         // Nodes stay converged (identical module audit roots).
-        const roots = new Set(nodes.map((n) => n.stateMachine.moduleAuditRoot()));
+        const roots = new Set(nodes.map((n) => n.app.host.auditRoot()));
         expect(roots.size).toBe(1);
     });
 });

@@ -1,6 +1,6 @@
 import express, { Application, NextFunction, Request, Response } from 'express';
 import cors from 'cors';
-import { RaftNode } from './consensus/raftNode';
+import { BookNode } from './models/bookStateMachine';
 import { Logger } from './platform/logger';
 import { MetricsRegistry } from './platform/metrics';
 import { requestContextMiddleware, getContext } from './platform/requestContext';
@@ -18,7 +18,7 @@ export interface AppDeps {
  * (request context, structured access logs, metrics) wired in as middleware so
  * every route inherits them.
  */
-export function createApp(node: RaftNode, deps: AppDeps = {}): Application {
+export function createApp(node: BookNode, deps: AppDeps = {}): Application {
     const app: Application = express();
     const { logger, metrics } = deps;
 

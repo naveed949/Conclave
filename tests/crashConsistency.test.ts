@@ -1,6 +1,6 @@
-import { RaftNode, RaftConfig } from '../src/consensus/raftNode';
+import { RaftNode } from '../src/consensus/raftNode';
 import { LocalTransport, RpcHandler, Transport } from '../src/consensus/transport';
-import { MemoryStorage } from '../src/consensus/storage';
+import { MemoryStorage, RaftStorage } from '../src/consensus/storage';
 import {
     InstallSnapshotArgs,
     InstallSnapshotReply,
@@ -11,13 +11,19 @@ import {
     AppendEntriesReply,
 } from '../src/consensus/types';
 import { buildAddCommand } from '../src/models/book';
+import { BookNode, BookStateMachine } from '../src/models/bookStateMachine';
 import { waitFor } from './helpers';
 
-const TIMERS: Partial<RaftConfig> = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
+const TIMERS = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
 
-function makeNode(id: string, peerIds: string[], registry: Map<string, RpcHandler>, opts: Partial<RaftConfig> = {}): RaftNode {
+function makeNode(
+    id: string,
+    peerIds: string[],
+    registry: Map<string, RpcHandler>,
+    opts: { snapshotThreshold?: number; storage?: RaftStorage } = {},
+): BookNode {
     const peers: PeerInfo[] = peerIds.filter((p) => p !== id).map((p) => ({ id: p, url: `local://${p}` }));
-    return new RaftNode({ id, peers, ...TIMERS, ...opts }, new LocalTransport(registry));
+    return new RaftNode({ id, peers, stateMachine: new BookStateMachine(), ...TIMERS, ...opts }, new LocalTransport(registry));
 }
 
 const add = (n: RaftNode, isbn: string) =>
@@ -66,7 +72,7 @@ describe('Crash consistency between snapshot and log files', () => {
         // State from the snapshot survives; new writes still work on top.
         expect(restarted.stateMachine.size()).toBeGreaterThan(0);
         await add(restarted, 'after-recovery');
-        expect(restarted.stateMachine.get(restarted.stateMachine.getAll().find((b) => b.isbn === 'after-recovery')!.id)).toBeDefined();
+        expect(restarted.app.get(restarted.app.getAll().find((b) => b.isbn === 'after-recovery')!.id)).toBeDefined();
         restarted.stop();
     });
 });
@@ -121,11 +127,11 @@ describe('sendSnapshot ships the durable boundary', () => {
         const transport = new CapturingTransport(registry);
         // n3 absent so the leader will need to InstallSnapshot it once it returns.
         const leader = new RaftNode(
-            { id: 'n1', peers: [{ id: 'n2', url: 'local://n2' }, { id: 'n3', url: 'local://n3' }], ...TIMERS, snapshotThreshold: 4 },
+            { id: 'n1', peers: [{ id: 'n2', url: 'local://n2' }, { id: 'n3', url: 'local://n3' }], stateMachine: new BookStateMachine(), ...TIMERS, snapshotThreshold: 4 },
             transport,
         );
         const n2 = new RaftNode(
-            { id: 'n2', peers: [{ id: 'n1', url: 'local://n1' }, { id: 'n3', url: 'local://n3' }], ...TIMERS, snapshotThreshold: 4 },
+            { id: 'n2', peers: [{ id: 'n1', url: 'local://n1' }, { id: 'n3', url: 'local://n3' }], stateMachine: new BookStateMachine(), ...TIMERS, snapshotThreshold: 4 },
             transport,
         );
         registry.set('n1', leader);
@@ -140,7 +146,7 @@ describe('sendSnapshot ships the durable boundary', () => {
 
         // Bring n3 online; it forces snapshot transfers.
         const n3 = new RaftNode(
-            { id: 'n3', peers: [{ id: 'n1', url: 'local://n1' }, { id: 'n2', url: 'local://n2' }], ...TIMERS, snapshotThreshold: 4 },
+            { id: 'n3', peers: [{ id: 'n1', url: 'local://n1' }, { id: 'n2', url: 'local://n2' }], stateMachine: new BookStateMachine(), ...TIMERS, snapshotThreshold: 4 },
             transport,
         );
         registry.set('n3', n3);

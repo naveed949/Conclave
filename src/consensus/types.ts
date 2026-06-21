@@ -1,76 +1,47 @@
-// Core type definitions for the Raft consensus implementation.
+// Core type definitions for the Raft consensus framework.
+//
+// These types are domain-agnostic: the consensus layer knows nothing about the
+// application riding on top of it. An application supplies its own command union
+// (any object with a string `type` discriminator) and a `StateMachine` that
+// applies those commands — see `consensus/stateMachine.ts` and the book example
+// in `models/`.
 
 /** Role of a node in the Raft cluster at any given moment. */
 export type Role = 'follower' | 'candidate' | 'leader';
 
-/** A book as stored in the replicated state machine. */
-export interface Book {
-    id: string;
-    title: string;
-    author: string;
-    publisher: string;
-    isbn: string;
-    copies: number;
-    totalCopies: number;
-    borrowedBy: string | null;
-    borrowedDate: string | null; // ISO timestamp
-    dueDate: string | null; // ISO timestamp
+/**
+ * The contract every application command must satisfy: a JSON-serializable
+ * object discriminated by a string `type`. The framework reserves the type
+ * values `NOOP` and `CONFIG` for its own control entries (see {@link Command}),
+ * so an application's command types must not collide with those.
+ */
+export interface AppCommand {
+    type: string;
 }
 
 /**
- * Commands are the unit of replication. The leader resolves all
- * non-deterministic values (ids, timestamps) BEFORE a command enters the
- * log, so every node applies the exact same command and converges to the
- * exact same state. This is what makes the cluster a deterministic
- * replicated state machine.
+ * What actually rides in the replicated log: either one of the framework's two
+ * control commands, or an application command `C`. The leader resolves every
+ * non-deterministic value (ids, timestamps) BEFORE a command enters the log, so
+ * every node applies the exact same command and converges to the exact same
+ * state. That determinism is what makes the cluster a replicated state machine.
+ *
+ * - `NOOP`   — internal Raft bookkeeping (e.g. the no-op a new leader commits to
+ *              make prior-term entries safely committable). Never audited.
+ * - `CONFIG` — a cluster membership change (Raft dissertation §4). Consumed by
+ *              the Raft node, which adopts `members` as its configuration the
+ *              moment the entry is appended (not when committed). A no-op for the
+ *              application state machine. `members` is the full new voting set.
  */
-export type Command =
+export type Command<C extends AppCommand = AppCommand> =
     | { type: 'NOOP' }
-    | { type: 'ADD'; book: Book }
-    | { type: 'UPDATE'; id: string; fields: Partial<Omit<Book, 'id'>> }
-    | { type: 'DELETE'; id: string }
-    | { type: 'BORROW'; id: string; borrowedBy: string; borrowedDate: string; dueDate: string }
-    | { type: 'RETURN'; id: string }
-    /**
-     * Cluster membership change (Raft dissertation §4). Consumed by the Raft
-     * node (which adopts `members` as its configuration the moment the entry is
-     * appended), and a no-op for the book state machine. `members` is the full
-     * new voting set, including the leader and any node being added/removed.
-     */
     | { type: 'CONFIG'; members: PeerInfo[] }
-    /**
-     * A generic module command routed to the runtime `ModuleHost` (ADR-0018,
-     * pillars 1–2) instead of the book state machine. `seed` is leader-resolved
-     * up front — the deterministic-runtime analog of resolving ids/timestamps
-     * before a command enters the log (see `models/book.ts`) — so every replica
-     * derives the identical reducer context and converges. The inline `seed`
-     * shape is structurally compatible with `runtime/types.ts` `Seed`; declaring
-     * it here (rather than importing from `src/runtime/`) keeps the consensus
-     * core free of any dependency on the runtime layer.
-     */
-    | {
-          type: 'MODULE';
-          module: string;
-          command: string;
-          input: unknown;
-          seed: { timestamp: string; nonce: string };
-          /**
-           * Optional ed25519 signature (base64) by the ORIGINATING ACTOR's key
-           * over the LOGICAL command only — `{ module, command, input, actor,
-           * requestId }`, NOT the leader-resolved `seed` (the actor signs before
-           * the leader picks the seed). Verified on the apply path against an
-           * actor->public-key registry when one is configured, so a malicious
-           * leader cannot forge `actor` (ADR-0018 pillar 7). Purely ADDITIVE:
-           * when no registry is configured, the signature is ignored and unsigned
-           * commands remain valid — existing behavior is unchanged.
-           */
-          sig?: string;
-      };
+    | C;
 
 /** A single entry in the replicated log. */
-export interface LogEntry {
+export interface LogEntry<C extends AppCommand = AppCommand> {
     term: number;
-    command: Command;
+    command: Command<C>;
     /** Leader-assigned metadata, replicated with the command (audit + idempotency). */
     meta?: CommandMeta;
 }
@@ -90,7 +61,8 @@ export interface CommandMeta {
 export interface AuditEntry {
     index: number;
     term: number;
-    type: Command['type'];
+    /** The command's discriminator (the application's type, or `CONFIG`). */
+    type: string;
     actor: string;
     requestId: string;
     timestamp: string;
@@ -99,16 +71,24 @@ export interface AuditEntry {
     hash: string;
 }
 
-/** The outcome of applying a command to the state machine. */
-export interface ApplyResult {
-    status: number; // HTTP-style status for the controller to relay
-    book?: Book;
+/**
+ * The outcome of applying a command to the state machine. `status` is an
+ * HTTP-style code the framework records in the audit trail and an HTTP adapter
+ * can relay; `data` is the application-defined payload (e.g. the affected
+ * entity), and `message` an optional human-readable note.
+ */
+export interface ApplyResult<T = unknown> {
+    status: number;
+    data?: T;
     message?: string;
-    /** A module command's return value, surfaced to the controller alongside book/message. */
-    result?: unknown;
 }
 
 // ---- RPC payloads (Raft figure 2) ----
+//
+// Replicated entries cross the wire as JSON, so the RPC payloads use the default
+// `AppCommand` form rather than threading the application's command type through
+// the transport. A node casts incoming entries back to its own command type at
+// the (inherently untyped) transport boundary.
 
 export interface RequestVoteArgs {
     term: number;
@@ -175,4 +155,14 @@ export interface Snapshot {
 export interface PeerInfo {
     id: string;
     url: string;
+}
+
+/** True for the framework's reserved control commands (never application commands). */
+export function isControlCommand(command: { type: string }): command is { type: 'NOOP' } | { type: 'CONFIG'; members: PeerInfo[] } {
+    return command.type === 'NOOP' || command.type === 'CONFIG';
+}
+
+/** Narrow a log command to a CONFIG membership entry. */
+export function isConfigCommand(command: { type: string }): command is { type: 'CONFIG'; members: PeerInfo[] } {
+    return command.type === 'CONFIG';
 }

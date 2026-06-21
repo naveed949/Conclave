@@ -1,14 +1,15 @@
-import { RaftNode, RaftConfig } from '../src/consensus/raftNode';
+import { RaftNode } from '../src/consensus/raftNode';
 import { LocalTransport, RpcHandler } from '../src/consensus/transport';
 import { AppendEntriesArgs, PeerInfo } from '../src/consensus/types';
 import { buildAddCommand } from '../src/models/book';
+import { BookNode, BookStateMachine } from '../src/models/bookStateMachine';
 import { waitFor } from './helpers';
 
-const TIMERS: Partial<RaftConfig> = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
+const TIMERS = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
 
-function makeNode(id: string, peerIds: string[], registry: Map<string, RpcHandler>): RaftNode {
+function makeNode(id: string, peerIds: string[], registry: Map<string, RpcHandler>): BookNode {
     const peers: PeerInfo[] = peerIds.filter((p) => p !== id).map((p) => ({ id: p, url: `local://${p}` }));
-    return new RaftNode({ id, peers, ...TIMERS }, new LocalTransport(registry));
+    return new RaftNode({ id, peers, stateMachine: new BookStateMachine(), ...TIMERS }, new LocalTransport(registry));
 }
 
 const add = (n: RaftNode, isbn: string) =>

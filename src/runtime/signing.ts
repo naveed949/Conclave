@@ -1,5 +1,5 @@
 /**
- * Actor-signed module commands (ADR-0018 pillar 7: "Sign commands with the
+ * Actor-signed module commands (ADR-0019 pillar 7: "Sign commands with the
  * originating actor's key so the leader cannot forge `actor`").
  *
  * This adds ACCOUNTABILITY without paying for full BFT. The originating actor
