@@ -37,7 +37,24 @@ export type Command =
      * appended), and a no-op for the book state machine. `members` is the full
      * new voting set, including the leader and any node being added/removed.
      */
-    | { type: 'CONFIG'; members: PeerInfo[] };
+    | { type: 'CONFIG'; members: PeerInfo[] }
+    /**
+     * A generic module command routed to the runtime `ModuleHost` (ADR-0018,
+     * pillars 1–2) instead of the book state machine. `seed` is leader-resolved
+     * up front — the deterministic-runtime analog of resolving ids/timestamps
+     * before a command enters the log (see `models/book.ts`) — so every replica
+     * derives the identical reducer context and converges. The inline `seed`
+     * shape is structurally compatible with `runtime/types.ts` `Seed`; declaring
+     * it here (rather than importing from `src/runtime/`) keeps the consensus
+     * core free of any dependency on the runtime layer.
+     */
+    | {
+          type: 'MODULE';
+          module: string;
+          command: string;
+          input: unknown;
+          seed: { timestamp: string; nonce: string };
+      };
 
 /** A single entry in the replicated log. */
 export interface LogEntry {
@@ -76,6 +93,8 @@ export interface ApplyResult {
     status: number; // HTTP-style status for the controller to relay
     book?: Book;
     message?: string;
+    /** A module command's return value, surfaced to the controller alongside book/message. */
+    result?: unknown;
 }
 
 // ---- RPC payloads (Raft figure 2) ----

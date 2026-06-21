@@ -13,8 +13,15 @@ export class BookStateMachine {
     /** Secondary index isbn -> id, so duplicate-ISBN checks are O(1), not O(n). */
     private idByIsbn = new Map<string, string>();
 
-    /** Apply a committed command. Must be deterministic. */
-    apply(command: Command): ApplyResult {
+    /**
+     * Apply a committed command. Must be deterministic.
+     *
+     * MODULE commands are a runtime concern routed to the `ModuleHost` by
+     * {@link ReplicatedStateMachine}, never the book store, so they are excluded
+     * from the accepted type. That keeps the `_never` exhaustiveness guard below
+     * honest: every remaining `Command` variant must be handled here.
+     */
+    apply(command: Exclude<Command, { type: 'MODULE' }>): ApplyResult {
         switch (command.type) {
             case 'NOOP':
                 return { status: 200 };

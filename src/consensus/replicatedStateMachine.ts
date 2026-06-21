@@ -1,6 +1,9 @@
 import { createHash } from 'crypto';
 import { BookStateMachine } from './stateMachine';
 import { ApplyResult, AuditEntry, Book, LogEntry } from './types';
+import { ModuleHost } from '../runtime/moduleHost';
+import { ModuleDefinition } from '../runtime/types';
+import { EMPTY_ROOT } from '../runtime/merkleAudit';
 
 const GENESIS_HASH = '0'.repeat(64);
 
@@ -13,6 +16,13 @@ export interface RsmSnapshot {
     audit: AuditEntry[];
     seen: [string, ApplyResult][];
     lastHash: string;
+    /**
+     * The embedded {@link ModuleHost} snapshot (module state + outbox + Merkle
+     * audit). Optional for back-compat: snapshots taken before module wiring (or
+     * by a node with no modules registered) omit it, and `restore()` tolerates
+     * its absence.
+     */
+    modules?: Record<string, unknown>;
 }
 
 /**
@@ -37,6 +47,12 @@ export interface RsmSnapshot {
  */
 export class ReplicatedStateMachine {
     private readonly books = new BookStateMachine();
+    /**
+     * The embedded module runtime (ADR-0018 pillars 1–2). Lazily created when the
+     * first module is registered, so a node that never uses modules carries no
+     * host and emits no `modules` field in its snapshot (back-compat).
+     */
+    private moduleHost?: ModuleHost;
     private readonly audit: AuditEntry[] = [];
     private readonly seen = new Map<string, ApplyResult>();
     private lastHash = GENESIS_HASH;
@@ -46,16 +62,42 @@ export class ReplicatedStateMachine {
         this.dedupLimit = dedupLimit > 0 ? dedupLimit : DEFAULT_DEDUP_LIMIT;
     }
 
+    // ---- module registration (run on every node BEFORE start) ----
+
+    /** Lazily create and return the embedded ModuleHost. */
+    private host(): ModuleHost {
+        if (!this.moduleHost) this.moduleHost = new ModuleHost();
+        return this.moduleHost;
+    }
+
+    /** Register one module so its reducers can apply on this node's MODULE path. */
+    registerModule(def: ModuleDefinition<any>): void {
+        this.host().register(def);
+    }
+
+    /** Register several modules at once. */
+    registerModules(defs: ModuleDefinition<any>[]): void {
+        for (const def of defs) this.host().register(def);
+    }
+
     /** Apply a committed log entry at `index`. Deterministic across nodes. */
     apply(index: number, entry: LogEntry): ApplyResult {
         const { command, meta } = entry;
 
-        // Idempotency: a replayed requestId yields the cached result, no re-apply.
+        // Idempotency FIRST — covers MODULE commands too: a replayed requestId
+        // yields the cached result without re-running the reducer (so a retried
+        // increment never double-applies).
         if (meta?.requestId && this.seen.has(meta.requestId)) {
             return this.seen.get(meta.requestId)!;
         }
 
-        const result = this.books.apply(command);
+        // MODULE commands are a runtime concern: dispatch them to the embedded
+        // ModuleHost. Everything else applies to the book store. Both paths share
+        // the hash-chain audit + idempotency bookkeeping below for uniformity.
+        const result: ApplyResult =
+            command.type === 'MODULE'
+                ? this.applyModule(command, meta)
+                : this.books.apply(command);
 
         // NOOP entries are internal Raft bookkeeping — keep them out of the audit.
         if (command.type !== 'NOOP') {
@@ -77,6 +119,33 @@ export class ReplicatedStateMachine {
 
         if (meta?.requestId) this.remember(meta.requestId, result);
         return result;
+    }
+
+    /**
+     * Dispatch a MODULE command to the embedded ModuleHost and map its
+     * `ModuleApplyResult` onto the generic `ApplyResult` the apply path expects.
+     * The ModuleHost keeps its own richer Merkle audit; the hash-chain audit in
+     * `apply()` still records the MODULE envelope (type + status) for uniformity.
+     */
+    private applyModule(
+        command: Extract<LogEntry['command'], { type: 'MODULE' }>,
+        meta: LogEntry['meta'],
+    ): ApplyResult {
+        const host = this.host();
+        const moduleResult = host.apply(
+            {
+                module: command.module,
+                command: command.command,
+                input: command.input,
+                seed: command.seed,
+            },
+            { actor: meta?.actor ?? 'system', requestId: meta?.requestId ?? '' },
+        );
+        return {
+            status: moduleResult.status,
+            result: moduleResult.result,
+            message: moduleResult.message,
+        };
     }
 
     /** Record a result, evicting the oldest entries (FIFO) past the cap. */
@@ -116,12 +185,17 @@ export class ReplicatedStateMachine {
     // ---- snapshot / restore (for log compaction) ----
 
     snapshot(): RsmSnapshot {
-        return {
+        const snap: RsmSnapshot = {
             books: this.books.getAll(),
             audit: this.getAuditLog(),
             seen: [...this.seen.entries()],
             lastHash: this.lastHash,
         };
+        // Fold the module runtime into the snapshot so module state, outbox, and
+        // Merkle audit survive log compaction/restart. Omit the field entirely
+        // when no host exists, keeping snapshots of module-free nodes unchanged.
+        if (this.moduleHost) snap.modules = this.moduleHost.snapshot();
+        return snap;
     }
 
     restore(snap: RsmSnapshot): void {
@@ -131,6 +205,10 @@ export class ReplicatedStateMachine {
         this.seen.clear();
         for (const [k, v] of snap.seen) this.seen.set(k, v);
         this.lastHash = snap.lastHash;
+        // Rehydrate the module runtime. Guard back-compat: older snapshots (and
+        // those from module-free nodes) carry no `modules` field, so only restore
+        // when both the snapshot has it and modules are registered on this node.
+        if (snap.modules && this.moduleHost) this.moduleHost.restore(snap.modules);
     }
 
     // ---- domain access (delegated) ----
@@ -141,4 +219,23 @@ export class ReplicatedStateMachine {
 
     /** Current number of remembered requestIds (bounded by the dedup limit). */
     dedupCacheSize(): number { return this.seen.size; }
+
+    // ---- module access (ADR-0018 runtime) ----
+
+    /** Run a read query against a module's state (undefined if no host/module). */
+    moduleQuery(module: string, name: string, args?: unknown): unknown {
+        return this.moduleHost?.query(module, name, args);
+    }
+
+    /** Current live state of a module (undefined if no host/module). */
+    moduleState(module: string): unknown {
+        return this.moduleHost?.getState(module);
+    }
+
+    /** The module runtime's Merkle audit root (the empty-tree root if no host). */
+    moduleAuditRoot(): string {
+        // A read must never allocate a host: a module-free node stays provably
+        // host-free (and its snapshots provably unchanged) even if queried.
+        return this.moduleHost ? this.moduleHost.auditRoot() : EMPTY_ROOT;
+    }
 }
