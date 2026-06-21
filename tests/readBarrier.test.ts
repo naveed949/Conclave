@@ -1,10 +1,11 @@
-import { RaftNode, RaftConfig, NotLeaderError } from '../src/consensus/raftNode';
+import { RaftNode, NotLeaderError } from '../src/consensus/raftNode';
 import { LocalTransport, RpcHandler } from '../src/consensus/transport';
 import { PeerInfo } from '../src/consensus/types';
 import { buildAddCommand } from '../src/models/book';
+import { BookNode, BookStateMachine } from '../src/models/bookStateMachine';
 import { waitFor } from './helpers';
 
-const TIMERS: Partial<RaftConfig> = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
+const TIMERS = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
 
 /** A cluster whose registry the test controls, so peers can be "partitioned". */
 function cluster(size: number) {
@@ -13,16 +14,16 @@ function cluster(size: number) {
     const ids = Array.from({ length: size }, (_, i) => `node${i + 1}`);
     const nodes = ids.map((id) => {
         const peers: PeerInfo[] = ids.filter((p) => p !== id).map((p) => ({ id: p, url: `local://${p}` }));
-        return new RaftNode({ id, peers, ...TIMERS }, transport);
+        return new RaftNode({ id, peers, stateMachine: new BookStateMachine(), ...TIMERS }, transport);
     });
     nodes.forEach((n) => registry.set(n.id, n));
     return { nodes, registry };
 }
 
-const leaderOf = (nodes: RaftNode[]) => nodes.find((n) => n.isLeader())!;
+const leaderOf = (nodes: BookNode[]) => nodes.find((n) => n.isLeader())!;
 
 describe('Linearizable reads (ReadIndex barrier)', () => {
-    let nodes: RaftNode[];
+    let nodes: BookNode[];
     let registry: Map<string, RpcHandler>;
 
     beforeEach(async () => {
@@ -35,12 +36,12 @@ describe('Linearizable reads (ReadIndex barrier)', () => {
 
     it('resolves on a healthy leader so the latest committed write is visible', async () => {
         const leader = leaderOf(nodes);
-        const { book } = await leader.submit(
+        const { data } = await leader.submit(
             buildAddCommand({ title: 'R', author: 'O', publisher: 'S', isbn: 'rb-1', copies: 1 }),
         );
 
         await expect(leader.readBarrier()).resolves.toBeUndefined();
-        expect(leader.stateMachine.get(book!.id)).toBeDefined();
+        expect(leader.app.get(data!.id)).toBeDefined();
     });
 
     it('rejects with NotLeaderError when the leader cannot reach a quorum', async () => {

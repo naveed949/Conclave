@@ -38,12 +38,12 @@ describe('Raft consensus cluster', () => {
         });
         const result = await leader.submit(cmd);
         expect(result.status).toBe(201);
-        const id = result.book!.id;
+        const id = result.data!.id;
 
         // Every node's state machine converges on the same book.
-        await waitFor(() => nodes.every((n) => n.stateMachine.get(id) !== undefined));
+        await waitFor(() => nodes.every((n) => n.app.get(id) !== undefined));
         for (const n of nodes) {
-            expect(n.stateMachine.get(id)).toMatchObject({ title: 'Distributed Systems', copies: 3 });
+            expect(n.app.get(id)).toMatchObject({ title: 'Distributed Systems', copies: 3 });
         }
     });
 
