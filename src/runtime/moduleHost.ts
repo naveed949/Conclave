@@ -785,6 +785,15 @@ export class ModuleHost {
     }
 
     /**
+     * Number of registered modules. A pure read (no state/audit/outbox touched),
+     * used only by the runtime metrics collector (Milestone 15) to report the
+     * `module_registered` gauge — observability, never on the apply/convergence path.
+     */
+    moduleCount(): number {
+        return this.modules.size;
+    }
+
+    /**
      * The code-version hash recorded for a module (or `undefined` if the module
      * is not registered). The same value every audited leaf from that module
      * carries — letting a verifier confirm which logic version produced a result.
