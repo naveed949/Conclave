@@ -2,6 +2,7 @@ import { EffectExecutor } from '../../src/runtime/effectExecutor';
 import { ModuleHost } from '../../src/runtime/moduleHost';
 import { defineModule } from '../../src/runtime/defineModule';
 import { payments } from '../../src/runtime/modules/payments';
+import { generateActorKeypair, KeyRegistry, signCommand } from '../../src/runtime/signing';
 import { EffectHandler, EffectResultEntry, ModuleCommand, Seed } from '../../src/runtime/types';
 
 const META = { actor: 'tester', requestId: 'req-1' };
@@ -289,6 +290,102 @@ describe('committed-intent effects: reserved module names', () => {
             commands: { noop: (state: unknown) => ({ state }) },
         };
         expect(() => host.register(sneaky as never)).toThrow(/reserved/);
+    });
+});
+
+describe('committed-intent effects: signed host (M12 fix)', () => {
+    // With a KeyRegistry configured, a caller `charge` MUST carry a valid actor
+    // signature. The effect's `settle` follow-up (onResult) is a runtime-internal,
+    // system-trusted consequence and carries NO signature — it must bypass actor
+    // verification, or the effect loop silently never completes (settle 401s and
+    // the order is stuck `pending`). This is the regression M12's fix addresses.
+    const SIGNED_META = { actor: 'alice', requestId: 'req-charge-1' };
+
+    function signedChargeHost(): { host: ModuleHost; signedCharge: ModuleCommand } {
+        const host = new ModuleHost();
+        host.register(payments);
+        const { publicKey, privateKey } = generateActorKeypair();
+        const registry = new KeyRegistry();
+        registry.registerActor('alice', publicKey);
+        host.setKeyRegistry(registry);
+
+        const input = { orderId: 'o1', amount: 100 };
+        const sig = signCommand(privateKey, {
+            module: 'payments',
+            command: 'charge',
+            input,
+            actor: SIGNED_META.actor,
+            requestId: SIGNED_META.requestId,
+        });
+        const signedCharge: ModuleCommand = {
+            module: 'payments',
+            command: 'charge',
+            input,
+            seed: seed('k1'),
+            sig,
+        };
+        return { host, signedCharge };
+    }
+
+    it('a SIGNED charge succeeds and its unsigned settle (onResult) still completes the loop', async () => {
+        const { host, signedCharge } = signedChargeHost();
+
+        // Signed actor command is accepted and enqueues the effect.
+        const res = host.apply(signedCharge, SIGNED_META);
+        expect(res.status).toBe(200);
+        expect(host.pendingEffects()).toHaveLength(1);
+
+        // Drain at the edge; the resolved result rides back as an EffectResultEntry.
+        const handler = okHandler();
+        const submitted: EffectResultEntry[] = [];
+        const exec = new EffectExecutor({ http: handler }, (e) => submitted.push(e));
+        await exec.drain(host.pendingEffects());
+        expect(submitted).toHaveLength(1);
+
+        // applyEffectResult dispatches the UNSIGNED `settle` (onResult). Despite the
+        // KeyRegistry, it is NOT rejected 401 — the loop completes.
+        const applyRes = host.applyEffectResult(submitted[0], SIGNED_META);
+        expect(applyRes.status).toBe(200);
+
+        const order = host.query('payments', 'order', { orderId: 'o1' }) as { status: string };
+        expect(order.status).toBe('paid');
+        expect(host.getOutbox()[0].status).toBe('done');
+        expect(host.pendingEffects()).toHaveLength(0);
+    });
+
+    it('on the same signed host, an UNSIGNED actor charge is still rejected 401', () => {
+        const { host } = signedChargeHost();
+        const unsigned: ModuleCommand = {
+            module: 'payments',
+            command: 'charge',
+            input: { orderId: 'o2', amount: 200 },
+            seed: seed('k2'),
+        };
+        const res = host.apply(unsigned, { actor: 'alice', requestId: 'req-unsigned' });
+        expect(res.status).toBe(401);
+        // No reducer ran: no effect enqueued, no order recorded.
+        expect(host.pendingEffects()).toHaveLength(0);
+        expect(host.query('payments', 'order', { orderId: 'o2' })).toBeUndefined();
+    });
+
+    it('on the same signed host, a FORGED actor charge (mismatched signer) is rejected 401', () => {
+        const { host } = signedChargeHost();
+        // Sign with a DIFFERENT key than alice's registered one (a leader forging
+        // `actor: alice`). The signature cannot verify against alice's public key.
+        const { privateKey: attackerKey } = generateActorKeypair();
+        const input = { orderId: 'o3', amount: 300 };
+        const sig = signCommand(attackerKey, {
+            module: 'payments',
+            command: 'charge',
+            input,
+            actor: 'alice',
+            requestId: 'req-forged',
+        });
+        const forged: ModuleCommand = { module: 'payments', command: 'charge', input, seed: seed('k3'), sig };
+        const res = host.apply(forged, { actor: 'alice', requestId: 'req-forged' });
+        expect(res.status).toBe(401);
+        expect(host.pendingEffects()).toHaveLength(0);
+        expect(host.query('payments', 'order', { orderId: 'o3' })).toBeUndefined();
     });
 });
 

@@ -152,11 +152,15 @@ the consensus core, so any app built on it inherits them for free.
   even if a forward times out and returns `421`. The dedup cache is **bounded**
   (`DEDUP_LIMIT`, default 10,000) with deterministic FIFO eviction, so it never
   grows without limit.
-- **Dynamic membership** — add or remove nodes at runtime (one at a time, Raft
-  §4.1) via `POST`/`DELETE /raft/members`, with no cluster restart. The new
-  configuration replicates as a log entry; a joining node catches up by normal
-  replication or an InstallSnapshot, and a leader removed from the cluster steps
-  down. A removed/partitioned node can't disrupt the cluster (leader stickiness).
+- **Dynamic membership** — add or remove nodes at runtime via **joint consensus**
+  (Raft §6 / ADR-0022) through `POST`/`DELETE /raft/members`, with no cluster
+  restart. A change transitions C-old→C-new through a joint configuration in which
+  every decision needs a majority of **both** sets (so even an arbitrary,
+  non-overlapping change is safe); the configuration replicates as a log entry, a
+  joining node catches up by normal replication or an InstallSnapshot, a leader
+  removed from the cluster steps down, and a new leader finishes a transition its
+  predecessor left unfinished. A removed/partitioned node can't disrupt the cluster
+  (leader stickiness).
 - **Leader forwarding** + `/ready` for load-balancer health checks.
 
 **Audit** — the replicated log *is* the audit trail. Each committed change is
@@ -248,13 +252,15 @@ Tests use `LocalTransport`, so they need no sockets and no database.
 
 ## Limitations (it's a POC)
 
-- Membership changes are one node at a time (Raft §4.1, no joint consensus) and a
-  joining node has no separate non-voting catch-up phase, so adding a far-behind
-  node while another is down can briefly stall commits.
+- Membership changes still apply one transition at a time, and a joining node has
+  no separate non-voting catch-up phase, so adding a far-behind node while another
+  is down can briefly stall commits. (Changes now use joint consensus — Raft §6 /
+  ADR-0022 — so the *single-server* restriction is gone; arbitrary changes are
+  safe.)
 - Reads default to the local replica (eventually consistent); linearizable reads
-  are available opt-in via `?consistency=strong` (leader-routed, no follower
-  read offloading or leases).
+  are available opt-in via `?consistency=strong`. These can be served by the leader
+  or offloaded to a follower via a ReadIndex RPC (Raft §6.4), but there are no
+  time-based leader leases (every barrier confirms a fresh heartbeat quorum).
 - The audit log grows unbounded (kept in full inside snapshots by design). The
   idempotency cache is bounded (`DEDUP_LIMIT`, FIFO), so a retry older than the
   window re-applies rather than being deduped.
-- Snapshots are sent in a single RPC (no chunking) — fine for a POC-sized state.

@@ -106,6 +106,7 @@ export class MetricsRegistry {
     );
     readonly raftElections = new Counter('raft_elections_total', 'Elections this node has started');
     readonly raftReadBarriers = new Counter('raft_read_barriers_total', 'Linearizable read barriers served as leader');
+    readonly raftFollowerReads = new Counter('raft_follower_reads_total', 'Linearizable reads served locally on a follower via a ReadIndex from the leader');
     readonly raftTerm = new Gauge('raft_term', 'Current Raft term');
     readonly raftIsLeader = new Gauge('raft_is_leader', '1 if this node is the leader');
     readonly raftCommitIndex = new Gauge('raft_commit_index', 'Highest committed log index');
@@ -117,12 +118,31 @@ export class MetricsRegistry {
     readonly raftClusterSize = new Gauge('raft_cluster_size', 'Voting members in the current cluster configuration');
     readonly stateMachineEntries = new Gauge('state_machine_entries', 'Entries currently in the application state machine');
 
+    // --- Module runtime observability (Milestone 15, ADR-0019). These mirror the
+    // Raft gauges above but for the module runtime: command throughput, outbox/audit
+    // depth, effect execution, and shard leadership. Per-node, like the Raft series.
+    readonly moduleCommands = new Counter('module_commands_total', 'Module commands applied, by module/command/status');
+    readonly moduleCommandDuration = new Histogram(
+        'module_command_duration_ms',
+        'Module command host-apply duration in milliseconds',
+        [0.5, 1, 5, 10, 25, 50, 100, 250, 500, 1000],
+    );
+    readonly moduleOutboxPending = new Gauge('module_outbox_pending', 'Outbox effect intents still pending execution');
+    readonly moduleOutboxDone = new Gauge('module_outbox_done', 'Outbox effect intents already executed (done)');
+    readonly moduleAuditSize = new Gauge('module_audit_size', 'Audited module commands (Merkle audit leaf count)');
+    readonly moduleRegistered = new Gauge('module_registered', 'Modules registered in the runtime host');
+    readonly effectRuns = new Counter('effect_runs_total', 'Effect handler invocations, by kind and outcome');
+    readonly shardHasLeader = new Gauge('shard_has_leader', '1 if the shard currently has a known leader, else 0');
+    readonly shardCount = new Gauge('shard_count', 'Number of shards in the router');
+
     private collectors: Collector[] = [];
     private metrics = [
-        this.httpRequests, this.httpDuration, this.raftElections, this.raftReadBarriers, this.raftTerm,
+        this.httpRequests, this.httpDuration, this.raftElections, this.raftReadBarriers, this.raftFollowerReads, this.raftTerm,
         this.raftIsLeader, this.raftCommitIndex, this.raftLastApplied, this.raftLogLength,
         this.raftSnapshotIndex, this.raftReplicationLag, this.raftDedupCacheSize, this.raftClusterSize,
         this.stateMachineEntries,
+        this.moduleCommands, this.moduleCommandDuration, this.moduleOutboxPending, this.moduleOutboxDone,
+        this.moduleAuditSize, this.moduleRegistered, this.effectRuns, this.shardHasLeader, this.shardCount,
     ];
 
     registerCollector(c: Collector): void {

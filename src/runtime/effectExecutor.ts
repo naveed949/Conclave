@@ -1,3 +1,4 @@
+import { MetricsRegistry } from '../platform/metrics';
 import { resolveSeed } from './context';
 import { EffectHandler, EffectIntent, EffectResultEntry } from './types';
 
@@ -28,6 +29,10 @@ export class EffectExecutor {
     constructor(
         private readonly handlers: Record<string, EffectHandler>,
         private readonly submit: (entry: EffectResultEntry) => void | Promise<void>,
+        // Optional metrics sink (Milestone 15). When set, each handler invocation
+        // increments `effect_runs_total{kind,outcome}`. Pure edge-side observability
+        // (the executor is already the non-deterministic edge), no-op when undefined.
+        private readonly metrics?: MetricsRegistry,
     ) {}
 
     /**
@@ -59,18 +64,34 @@ export class EffectExecutor {
 
         this.inFlight.add(key);
         try {
-            const result = await handler(intent);
+            // Attribute the handler OUTCOME from a try/catch around the handler call
+            // ALONE — counted exactly once (success XOR failure). A later `submit`
+            // failure is control flow, not a handler failure, so it must not also
+            // increment `failure` (which would double-count this invocation).
+            let result: unknown;
+            try {
+                result = await handler(intent);
+            } catch {
+                // Handler failed (e.g. network error): leave the effect pending so
+                // the next drain retries. Submitting nothing keeps the outbox entry
+                // `pending`, preserving at-least-once handler semantics.
+                this.metrics?.effectRuns.inc({ kind: intent.kind, outcome: 'failure' });
+                return;
+            }
+            this.metrics?.effectRuns.inc({ kind: intent.kind, outcome: 'success' });
             // The seed is resolved once on the edge by the executor, then committed
             // verbatim so every replica applies the same value (convergence comes
             // from committing the value, not from where it was generated). That
             // deterministic seed keeps any consuming `onResult` reducer's `ctx`
             // identical on every replica.
             const entry: EffectResultEntry = { idempotencyKey: key, result, seed: resolveSeed() };
-            await this.submit(entry);
-        } catch {
-            // Handler failed (e.g. network error): swallow and leave the effect
-            // pending so the next drain retries. Submitting nothing keeps the
-            // outbox entry `pending`, preserving at-least-once handler semantics.
+            try {
+                await this.submit(entry);
+            } catch {
+                // Submit failed (lost leadership / transport): no result committed,
+                // so the outbox entry stays `pending` and a later drain retries. The
+                // handler already succeeded — do NOT re-attribute this as a failure.
+            }
         } finally {
             this.inFlight.delete(key);
         }

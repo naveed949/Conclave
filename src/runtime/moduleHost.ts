@@ -242,6 +242,24 @@ export class ModuleHost {
             return denied;
         }
 
+        return this.dispatchAndEnqueue(cmd, meta);
+    }
+
+    /**
+     * Run a command through the reducer dispatch core and record any effects it
+     * emits into the outbox. This is the SHARED post-verification apply path:
+     * `apply()` calls it AFTER signature verification (caller commands), and
+     * `applyEffectResult()` calls it DIRECTLY for the system-internal `onResult`
+     * follow-up — which carries no actor signature and must bypass verification
+     * (it is a runtime-internal consequence of an already-verified command, not a
+     * fresh actor command). Everything else (reducer execution, mutation-safe
+     * clone, resource-bound 413 check, audit leaf, determinism) is identical for
+     * both paths because both run the same `dispatch` + the same enqueue here.
+     */
+    private dispatchAndEnqueue(
+        cmd: ModuleCommand,
+        meta: { actor: string; requestId: string },
+    ): ModuleApplyResult {
         const result = this.dispatch(cmd, meta);
         if (result.status === 200) {
             // Record each emitted effect into the outbox as `pending`, but only if
@@ -609,9 +627,19 @@ export class ModuleHost {
         }
 
         // Feed the edge-resolved result to the consuming reducer. We go through
-        // `apply` (not bare `dispatch`) so any effects the onResult reducer emits
-        // are themselves enqueued into the outbox.
-        return this.apply(
+        // `dispatchAndEnqueue` (dispatch + outbox enqueue) and NOT the public
+        // `apply`, so this system-internal follow-up SKIPS actor-signature
+        // verification: the synthesized `onResult` command (e.g. `payments.settle`)
+        // carries no `sig`, and on a host with a `KeyRegistry` configured `apply`
+        // would reject it 401 — silently stalling the effect loop. The originating
+        // command (e.g. `charge`) was already actor-verified; this `settle` is a
+        // runtime-internal, system-trusted consequence, so it must not require an
+        // actor signature. All the OTHER apply-path behavior is preserved: the
+        // reducer runs, mutation-safety clone, the resource-bound 413 check, the
+        // audit leaf, and — via `dispatchAndEnqueue` — outbox recording of any
+        // effects this reducer itself emits. Determinism is unchanged: this is a
+        // pure refactor of WHO verifies, not of the dispatch path.
+        return this.dispatchAndEnqueue(
             {
                 module: onResult.module,
                 command: onResult.command,
@@ -754,6 +782,15 @@ export class ModuleHost {
     /** Number of audited commands. */
     auditSize(): number {
         return this.audit.size();
+    }
+
+    /**
+     * Number of registered modules. A pure read (no state/audit/outbox touched),
+     * used only by the runtime metrics collector (Milestone 15) to report the
+     * `module_registered` gauge — observability, never on the apply/convergence path.
+     */
+    moduleCount(): number {
+        return this.modules.size;
     }
 
     /**

@@ -5,7 +5,15 @@ import { AppCommand, CommandMeta } from '../consensus/types';
 import { getContext } from '../platform/requestContext';
 import { forwardToLeader, isForwarded } from '../platform/forward';
 
-/** Internal cluster endpoints: peer RPCs, membership admin, and a status view. */
+/**
+ * Internal cluster endpoints: peer RPCs, membership admin, and a status view.
+ *
+ * This is the Raft-SPECIFIC adapter: it exposes the protocol RPC endpoints
+ * (`handleRequestVote`/`handleAppendEntries`/`handleInstallSnapshot`, the
+ * `RpcHandler` surface) which are Raft-shaped and would be replaced *differently*
+ * by a BFT engine. It is therefore intentionally typed to the concrete
+ * {@link RaftNode}, NOT the engine-agnostic {@link Consensus} seam (ADR-0021).
+ */
 export default function raftRoutes<C extends AppCommand, T, SM extends StateMachine<C, T>>(
     node: RaftNode<C, T, SM>,
 ) {
@@ -21,6 +29,13 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
 
     router.post('/install-snapshot', (req, res) => {
         res.json(node.handleInstallSnapshot(req.body));
+    });
+
+    // ReadIndex (Raft §6.4): a follower asks the leader to confirm leadership and
+    // return a safe read index, so the follower can serve a linearizable read
+    // locally (follower read offloading) instead of forwarding the whole read.
+    router.post('/read-index', async (req, res) => {
+        res.json(await node.handleReadIndex(req.body));
     });
 
     router.get('/status', (_req, res) => {

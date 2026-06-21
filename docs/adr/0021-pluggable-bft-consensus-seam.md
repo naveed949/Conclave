@@ -41,11 +41,15 @@ pluggability point.
 
 **Do not implement BFT in the prototype.** Instead:
 
-1. **Name the real seam.** Define (in documentation, and as a refactoring target)
-   a `Consensus` interface capturing exactly what the runtime needs: `submit`,
-   `readBarrier`, membership, and a leadership/status view — the subset of
-   `RaftNode` that `ReplicatedStateMachine` and the controllers actually use. A
-   BFT engine would implement *that*, not the Raft `Transport`.
+1. **Name the real seam.** Define a `Consensus` interface
+   (`src/consensus/consensus.ts`, extracted in M13) capturing exactly what the
+   runtime needs: `submit`, `readBarrier`, membership, and a leadership/status
+   view — the subset of `RaftNode` that `ReplicatedStateMachine` and the
+   controllers actually use. `RaftNode implements Consensus`, and the
+   application-facing consumers (the book/module controllers, the audit routes,
+   the effect driver, and the structural `ShardRouter` node) now depend on the
+   interface, not the concrete node. A BFT engine would implement *that*, not the
+   Raft `Transport`.
 2. **Reuse M7 as a building block.** BFT requires signed, non-repudiable messages;
    the ed25519 signing + `KeyRegistry` from M7 is the cryptographic primitive a
    BFT layer would build on (signing *consensus votes*, not just client commands).
@@ -74,11 +78,22 @@ pluggability point.
 
 - The system remains single-trust-domain (CFT) — unsuitable for adversarial,
   multi-organization deployments, exactly as ADR-0018 concluded.
-- The application boundary *below* the log — the `StateMachine` interface — is now
-  extracted (ADR-0017), so applications already plug in cleanly. But the ordering
-  boundary *above* the log (a `Consensus` interface a BFT engine would implement)
-  is still not extracted: `RaftNode` is referenced directly (e.g. `ShardRouter`,
-  controllers), so a real BFT swap would first require that second refactor.
+- The application boundary *below* the log — the `StateMachine` interface
+  (ADR-0017) — and the ordering boundary *above* the log — the `Consensus`
+  interface (extracted in M13, `src/consensus/consensus.ts`) — are now BOTH
+  extracted, so applications and the HTTP/runtime layers plug in cleanly and a BFT
+  engine could implement `Consensus` without those consumers changing. Two gaps
+  remain, both narrow and deliberate:
+  - **Transport/RPC surface.** `Consensus` is the commit-ordered-log contract, not
+    the wire protocol. The Raft RPCs (`RpcHandler` in `transport.ts`:
+    `handleRequestVote`/`handleAppendEntries`/`handleInstallSnapshot`) are
+    Raft-shaped and are NOT part of `Consensus`; a BFT engine needs a different,
+    multi-phase, signed message surface, so `raftRoutes.ts` stays typed to the
+    concrete `RaftNode`. That surface is replaced differently (not 1:1) by BFT.
+  - **Construction/wiring.** `RaftNode` is still instantiated directly by
+    `server.ts`/`moduleServer.ts`/tests. That is wiring (choosing the engine), not
+    the contract — swapping engines means changing those few construction sites,
+    not the controllers or routes.
 
 ## Alternatives considered
 
