@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { canonicalJson } from './canonical';
 
 /**
  * Merkle accumulator audit (ADR-0018 pillar 5). Upgrades the consensus core's
@@ -74,43 +75,22 @@ function hashNode(left: string, right: string): string {
 export const EMPTY_ROOT = sha256('');
 
 /**
- * Canonical JSON: stringify with object keys recursively sorted, so logically
- * equal leaves serialize to the SAME bytes regardless of property insertion
- * order. This is the determinism linchpin — without it, two replicas building a
- * leaf object with different key order would hash differently and diverge.
- *
- * `undefined` is REJECTED (we throw rather than normalize). Bare
- * `JSON.stringify(undefined)` yields the value `undefined` (not a string), and a
- * property whose value is `undefined` is silently dropped — both produce output
- * that is non-deterministic or invalid JSON, which would corrupt a leaf hash.
- * No current `AuditLeaf` field is ever `undefined`; throwing here keeps that
- * guarantee enforced and loud for any future reuse, rather than hashing garbage.
- */
-function canonical(value: unknown): string {
-    if (value === undefined) {
-        throw new Error('canonical: undefined is not serializable (would corrupt the leaf hash)');
-    }
-    if (value === null || typeof value !== 'object') {
-        return JSON.stringify(value);
-    }
-    if (Array.isArray(value)) {
-        return `[${value.map(canonical).join(',')}]`;
-    }
-    const obj = value as Record<string, unknown>;
-    const parts = Object.keys(obj)
-        .sort()
-        .map((k) => `${JSON.stringify(k)}:${canonical(obj[k])}`);
-    return `{${parts.join(',')}}`;
-}
-
-/**
  * Hash a leaf via its canonical serialization, in the LEAF domain (`0x00`
  * prefix). The tag keeps leaf hashes disjoint from internal-node hashes so a
  * proof's `leafHash` can never be a smuggled internal node. Pure and
  * replica-stable.
+ *
+ * The serializer (shared `canonicalJson` from `./canonical`) sorts object keys
+ * recursively so logically-equal leaves serialize to the SAME bytes regardless
+ * of property insertion order — the determinism linchpin for the leaf hash. We
+ * use the THROW-on-`undefined` mode because this is a hash PREIMAGE: it must be
+ * lossless and unambiguous, so any `undefined` (which `JSON.stringify` would
+ * silently drop or emit as the value `undefined`) is rejected loudly rather than
+ * corrupting the leaf hash. No current `AuditLeaf` field is ever `undefined`;
+ * the throw keeps that enforced for any future reuse.
  */
 function hashLeaf(leaf: AuditLeaf): string {
-    return sha256(LEAF_TAG + canonical(leaf));
+    return sha256(LEAF_TAG + canonicalJson(leaf, { onUndefined: 'throw' }));
 }
 
 /**

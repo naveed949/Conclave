@@ -165,3 +165,30 @@ export interface ModuleApplyResult {
     effects: EffectIntent[];
     message?: string;
 }
+
+/**
+ * Construction options for `ModuleHost` (ADR-0018 pillar 6 "resource safety").
+ *
+ * These bound the AMPLIFICATION a single command may cause: how many effects it
+ * may enqueue, and how large the next-state it may produce. They are a
+ * DETERMINISTIC resource bound, NOT a CPU/step meter — every replica computes
+ * the same effect count and the same canonical byte size from the same reducer
+ * output, so an over-budget command is rejected IDENTICALLY on every node and
+ * the bound never causes divergence. A preemptive CPU/instruction meter (which
+ * would need a vm/worker to interrupt a runaway reducer mid-execution) is
+ * explicitly DEFERRED per ADR-0018; this guards the cheap, deterministic axes
+ * (fan-out and state size) that can be measured purely after the reducer returns.
+ */
+export interface ModuleHostOptions {
+    /**
+     * Max number of effect intents one command may emit. Caps outbox fan-out so
+     * a single command cannot flood the post-commit executor. Default: 16.
+     */
+    maxEffects?: number;
+    /**
+     * Max canonical-JSON byte size of the next-state a reducer may produce. Caps
+     * state amplification so a single command cannot bloat replicated state (and
+     * thus every snapshot) without bound. Default: 64 KiB.
+     */
+    maxResultBytes?: number;
+}

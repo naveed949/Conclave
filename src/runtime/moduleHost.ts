@@ -1,5 +1,6 @@
 import { createContext } from './context';
 import { moduleCodeHash } from './codeHash';
+import { canonicalBytes } from './determinism';
 import { AuditLeaf, MerkleAudit, MerkleProof } from './merkleAudit';
 import {
     EffectIntent,
@@ -7,8 +8,14 @@ import {
     ModuleApplyResult,
     ModuleCommand,
     ModuleDefinition,
+    ModuleHostOptions,
     OutboxEntry,
 } from './types';
+
+/** Default ceiling on effects emitted by a single command. See `ModuleHostOptions`. */
+const DEFAULT_MAX_EFFECTS = 16;
+/** Default ceiling on the canonical byte size of a command's next-state (64 KiB). */
+const DEFAULT_MAX_RESULT_BYTES = 64 * 1024;
 
 /**
  * Deep-clone via JSON round-trip. Used so snapshots are decoupled from live
@@ -58,6 +65,20 @@ export class ModuleHost {
      * (driven only by the command stream), it is each leaf's `seq` / index.
      */
     private auditSeq = 0;
+
+    /**
+     * Deterministic resource bound (ADR-0018 pillar 6): the max effects one
+     * command may emit and the max canonical byte size of the next-state it may
+     * produce. Computed identically on every replica, so over-budget commands
+     * are rejected uniformly — NOT a CPU meter (that is deferred; needs a vm).
+     */
+    private readonly maxEffects: number;
+    private readonly maxResultBytes: number;
+
+    constructor(opts: ModuleHostOptions = {}) {
+        this.maxEffects = opts.maxEffects ?? DEFAULT_MAX_EFFECTS;
+        this.maxResultBytes = opts.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
+    }
 
     /** Register a module and initialize its state. Throws on a duplicate name. */
     register(def: ModuleDefinition<any>): void {
@@ -139,10 +160,41 @@ export class ModuleHost {
         let outcome: ModuleApplyResult;
         try {
             const result = reducer(working, cmd.input, ctx);
-            this.states.set(cmd.module, result.state);
-            // Surface the reducer's explicit `result` value, not the whole
-            // ReducerResult — callers get a purpose-built value, not next-state.
-            outcome = { status: 200, result: result.result, effects: result.effects ?? [] };
+            const effects = result.effects ?? [];
+
+            // Deterministic resource bound (ADR-0018 pillar 6). Computed AFTER the
+            // reducer returns, from its output alone — every replica derives the
+            // same effect count and the same canonical byte size, so an
+            // over-budget command is rejected identically everywhere (no
+            // divergence). On rejection we DO NOT adopt the next-state and DO NOT
+            // surface the effects: it is treated as a failed apply, audited with a
+            // 413 status for uniformity (consistent with a business-failure
+            // status), leaving committed state and the outbox untouched.
+            if (effects.length > this.maxEffects) {
+                outcome = {
+                    status: 413,
+                    effects: [],
+                    message:
+                        `Command "${cmd.command}" on module "${cmd.module}" emitted ${effects.length} ` +
+                        `effects, exceeding the limit of ${this.maxEffects}`,
+                };
+            } else {
+                const stateBytes = canonicalBytes(result.state);
+                if (stateBytes > this.maxResultBytes) {
+                    outcome = {
+                        status: 413,
+                        effects: [],
+                        message:
+                            `Command "${cmd.command}" on module "${cmd.module}" produced a ${stateBytes}-byte ` +
+                            `state, exceeding the limit of ${this.maxResultBytes} bytes`,
+                    };
+                } else {
+                    // Under budget: adopt the next-state and surface the reducer's
+                    // explicit `result` value (not the whole ReducerResult).
+                    this.states.set(cmd.module, result.state);
+                    outcome = { status: 200, result: result.result, effects };
+                }
+            }
         } catch (err) {
             // A throwing reducer must not corrupt state or halt the host; report it.
             const message = err instanceof Error ? err.message : String(err);
