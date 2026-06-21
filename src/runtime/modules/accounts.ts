@@ -57,6 +57,33 @@ export const accounts = defineKeyedModule({
         },
 
         /**
+         * Read the single account by key, subtract `amount`, write it back. The
+         * single-key debit half of a CROSS-SHARD transfer (ADR-0019): a cross-shard
+         * transfer cannot be one `transfer` command (the two accounts live in
+         * different Raft groups), so the saga composes `withdraw` on the source
+         * shard with `deposit` on the target shard. Rejects (non-200) on a missing
+         * account or insufficient balance so the saga can compensate; because the
+         * host commits the StoreView only on a clean return, a rejection writes
+         * nothing — the balance is unchanged, never partially debited.
+         */
+        withdraw: (store, input) => {
+            const { id, amount } = (input ?? {}) as { id: string; amount: number };
+            if (!(amount > 0)) {
+                throw new Error('withdraw amount must be positive');
+            }
+            const account = store.get(id) as Account | undefined;
+            if (!account) {
+                throw new Error(`account "${id}" not found`);
+            }
+            if (account.balance < amount) {
+                throw new Error(`insufficient balance in "${id}"`);
+            }
+            account.balance -= amount;
+            store.put(id, account);
+            return { result: account };
+        },
+
+        /**
          * Move funds between two accounts, touching ONLY the two involved keys.
          * Rejects on a missing account or insufficient balance; because the host
          * commits the StoreView atomically, a rejection (thrown) writes neither
