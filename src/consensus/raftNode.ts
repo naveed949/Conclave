@@ -17,6 +17,8 @@ import {
     isConfigCommand,
     LogEntry,
     PeerInfo,
+    ReadIndexArgs,
+    ReadIndexReply,
     RequestVoteArgs,
     RequestVoteReply,
     Role,
@@ -496,6 +498,84 @@ export class RaftNode<
         if (!confirmed || this.role !== 'leader') throw new NotLeaderError(this.leaderId);
         this.metrics?.raftReadBarriers.inc({ node: this.id });
         await this.waitForApplied(readIndex);
+    }
+
+    /**
+     * Linearizable read barrier that can be satisfied on ANY node, so a strong
+     * read arriving at a FOLLOWER is served LOCALLY rather than forwarded whole
+     * to the leader (Raft §6.4 ReadIndex, follower read offloading).
+     *
+     * - On the leader, this is exactly {@link readBarrier} (unchanged path).
+     * - On a follower, it obtains a confirmed `readIndex` from the leader via the
+     *   {@link ReadIndexArgs} RPC, then waits until this node has APPLIED through
+     *   that index. Only then may the caller serve from this follower's local
+     *   state, guaranteeing the read reflects every write committed before the
+     *   request.
+     *
+     * Fails closed: any uncertainty (no known leader, RPC lost, the leader can't
+     * confirm a quorum or reports a higher term, or the local apply times out)
+     * throws {@link NotLeaderError} (or a barrier-timeout error), so the caller
+     * forwards/421s instead of serving a possibly-stale value. A candidate (no
+     * known leader) likewise throws.
+     */
+    async readBarrierLocal(): Promise<void> {
+        if (this.role === 'leader') return this.readBarrier();
+
+        // Follower (or candidate): we need a confirmed read index from the leader.
+        const leaderId = this.leaderId;
+        if (!leaderId || leaderId === this.id) throw new NotLeaderError(leaderId);
+        const leader = this.members.get(leaderId);
+        if (!leader) throw new NotLeaderError(leaderId);
+
+        const term = this.currentTerm;
+        const reply = await this.transport.sendReadIndex(leader, { term });
+        // No reply / leader couldn't confirm / a newer term exists — fail closed.
+        if (!reply || !reply.success || reply.readIndex === undefined) {
+            if (reply && reply.term > this.currentTerm) this.becomeFollower(reply.term);
+            throw new NotLeaderError(this.leaderId);
+        }
+        if (reply.term > this.currentTerm) {
+            // The leader has moved to a newer term: our view is stale, don't serve.
+            this.becomeFollower(reply.term);
+            throw new NotLeaderError(this.leaderId);
+        }
+        // A `reply.term < currentTerm` with success can't be unsafe: handleReadIndex
+        // steps down (success:false) when the requester's term is higher than its
+        // own, so a success here means the leader confirmed a quorum at a term >=
+        // ours — its `readIndex` is a valid lower bound on writes committed before
+        // this read. No special handling needed for the strict-less-than case.
+
+        this.metrics?.raftFollowerReads.inc({ node: this.id });
+        // Block until THIS node has applied through the confirmed read index, so
+        // the subsequent local read can't observe state older than the barrier.
+        await this.waitForApplied(reply.readIndex);
+    }
+
+    /**
+     * Leader half of the ReadIndex protocol, exposed as an RPC for follower read
+     * offloading. If we are not the leader, fail closed (`success: false`) so the
+     * follower forwards. Otherwise capture `readIndex = commitIndex` and run the
+     * EXISTING heartbeat-quorum {@link confirmLeadership} round; only on a
+     * confirmed quorum (and still leader at the same term) do we return the index.
+     * This is precisely the leader half of {@link readBarrier} — the leader's own
+     * `readBarrier` semantics are unchanged.
+     */
+    async handleReadIndex(args: ReadIndexArgs): Promise<ReadIndexReply> {
+        // A requester at a higher term means a newer term exists somewhere: step
+        // down (we cannot be a legitimate leader) and refuse to vouch for an index.
+        if (args.term > this.currentTerm) {
+            this.becomeFollower(args.term);
+            return { term: this.currentTerm, success: false };
+        }
+        if (this.role !== 'leader') return { term: this.currentTerm, success: false };
+        const readIndex = this.commitIndex;
+        const term = this.currentTerm;
+        const confirmed = await this.confirmLeadership();
+        if (!confirmed || this.role !== 'leader' || this.currentTerm !== term) {
+            return { term: this.currentTerm, success: false };
+        }
+        this.metrics?.raftReadBarriers.inc({ node: this.id });
+        return { term: this.currentTerm, success: true, readIndex };
     }
 
     /**

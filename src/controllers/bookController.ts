@@ -58,10 +58,13 @@ export function createBookController(node: BookConsensus) {
         }
     };
 
-    // Run `serve` only after the leader's linearizable read barrier resolves.
+    // Run `serve` only after the linearizable read barrier resolves. On a
+    // follower this obtains a ReadIndex from the leader and applies through it,
+    // then serves LOCALLY (no forwarding); only if no confirmed read index can be
+    // obtained does it fall back to forwarding/421 (fail closed — never stale).
     const strongRead = async (req: Request, res: Response, serve: () => void): Promise<void> => {
         try {
-            await node.readBarrier();
+            await node.readBarrierLocal();
             serve();
         } catch (err) {
             if (err instanceof NotLeaderError) return onNotLeader(req, res, err);

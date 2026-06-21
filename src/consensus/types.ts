@@ -152,6 +152,31 @@ export interface InstallSnapshotReply {
     term: number;
 }
 
+/**
+ * Lightweight ReadIndex RPC (Raft §6.4): a follower asks the leader to confirm
+ * its leadership and return a safe read index, so the follower can serve a
+ * linearizable read LOCALLY (offloading read serving) without forwarding the
+ * whole read to the leader. The leader half is exactly the leader's
+ * `readBarrier` (capture commitIndex, confirm a heartbeat quorum) exposed as an
+ * RPC — see `RaftNode.handleReadIndex` / `RaftNode.readBarrierLocal`.
+ */
+export interface ReadIndexArgs {
+    /**
+     * The requester's current term. If it exceeds the responder's term, a newer
+     * term exists and the responder steps down and refuses (success: false) rather
+     * than vouch for a read index it may no longer be entitled to serve.
+     */
+    term: number;
+}
+
+export interface ReadIndexReply {
+    term: number;
+    /** True only if the responder is the leader AND confirmed a quorum this round. */
+    success: boolean;
+    /** The confirmed read index (the leader's commitIndex), present on success. */
+    readIndex?: number;
+}
+
 /** A point-in-time snapshot that replaces the log up to lastIncludedIndex. */
 export interface Snapshot {
     lastIncludedIndex: number;

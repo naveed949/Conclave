@@ -106,6 +106,7 @@ export class MetricsRegistry {
     );
     readonly raftElections = new Counter('raft_elections_total', 'Elections this node has started');
     readonly raftReadBarriers = new Counter('raft_read_barriers_total', 'Linearizable read barriers served as leader');
+    readonly raftFollowerReads = new Counter('raft_follower_reads_total', 'Linearizable reads served locally on a follower via a ReadIndex from the leader');
     readonly raftTerm = new Gauge('raft_term', 'Current Raft term');
     readonly raftIsLeader = new Gauge('raft_is_leader', '1 if this node is the leader');
     readonly raftCommitIndex = new Gauge('raft_commit_index', 'Highest committed log index');
@@ -136,7 +137,7 @@ export class MetricsRegistry {
 
     private collectors: Collector[] = [];
     private metrics = [
-        this.httpRequests, this.httpDuration, this.raftElections, this.raftReadBarriers, this.raftTerm,
+        this.httpRequests, this.httpDuration, this.raftElections, this.raftReadBarriers, this.raftFollowerReads, this.raftTerm,
         this.raftIsLeader, this.raftCommitIndex, this.raftLastApplied, this.raftLogLength,
         this.raftSnapshotIndex, this.raftReplicationLag, this.raftDedupCacheSize, this.raftClusterSize,
         this.stateMachineEntries,
