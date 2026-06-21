@@ -11,6 +11,9 @@ import { AnyModuleDefinition } from './runtime/moduleHost';
 import { counter } from './runtime/modules/counter';
 import { notes } from './runtime/modules/notes';
 import { accounts } from './runtime/modules/accounts';
+import { payments } from './runtime/modules/payments';
+import { EffectDriver } from './runtime/effectDriver';
+import { EffectHandler } from './runtime/types';
 
 dotenv.config();
 
@@ -33,6 +36,7 @@ const demoModules: AnyModuleDefinition[] = [
     counter as AnyModuleDefinition,
     notes as AnyModuleDefinition,
     accounts,
+    payments as AnyModuleDefinition,
 ];
 stateMachine.host.registerModules(demoModules);
 
@@ -47,13 +51,29 @@ metrics.registerCollector(() => node.collectMetrics());
 const app = createModuleApp(node, { logger, metrics });
 const PORT = getPort();
 
+// The committed-intent effect loop (M12). The driver polls the leader's outbox
+// post-commit and runs each pending effect's handler at the edge, feeding the
+// result back through the log. The `http` handler is the demo effect for the
+// `payments` module: it resolves a deterministic-SHAPED outcome (no real
+// network) so the `settle` follow-up can flip the order to paid on every node.
+const effectHandlers: Record<string, EffectHandler> = {
+    http: async (intent) => {
+        const { orderId } = (intent.payload ?? {}) as { orderId: string };
+        return { orderId, ok: true };
+    },
+};
+const effectDriver = new EffectDriver(node, effectHandlers);
+
 const server = app.listen(PORT, () => {
     logger.info('module node started', { node: config.id, port: PORT, peers: config.peers.length });
     node.start();
+    // Start after the node so the driver only ever acts once a leader is known.
+    effectDriver.start();
 });
 
 const shutdown = () => {
     logger.info('shutting down', { node: config.id });
+    effectDriver.stop();
     node.stop();
     server.close(() => process.exit(0));
 };
