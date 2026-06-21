@@ -2,6 +2,7 @@ import { createContext } from './context';
 import { moduleCodeHash } from './codeHash';
 import { canonicalBytes } from './determinism';
 import { AuditLeaf, MerkleAudit, MerkleProof } from './merkleAudit';
+import { KeyRegistry, SignablePayload, verifyCommand } from './signing';
 import {
     EffectIntent,
     EffectResultEntry,
@@ -75,9 +76,35 @@ export class ModuleHost {
     private readonly maxEffects: number;
     private readonly maxResultBytes: number;
 
+    /**
+     * Optional actor->public-key registry (ADR-0018 pillar 7). When SET, every
+     * caller `apply()` must carry a valid actor signature over its logical
+     * command or it is rejected (401) before its reducer runs. When UNSET
+     * (default), no verification happens and behavior is exactly as before —
+     * the back-compat guarantee that keeps all existing tests green. Configured
+     * per node before start (like modules), identical on every node, so
+     * verification converges.
+     */
+    private keyRegistry?: KeyRegistry;
+
     constructor(opts: ModuleHostOptions = {}) {
         this.maxEffects = opts.maxEffects ?? DEFAULT_MAX_EFFECTS;
         this.maxResultBytes = opts.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
+    }
+
+    /**
+     * Configure the actor signature registry (ADR-0018 pillar 7). Call before
+     * start, identically on every node. Once set, caller commands are verified
+     * on the apply path; until set, verification is skipped (back-compat).
+     */
+    setKeyRegistry(reg: KeyRegistry): void {
+        this.keyRegistry = reg;
+    }
+
+    /** Authorize `publicKeyPem` as the signer for `actor`, creating the registry if needed. */
+    registerActorKey(actor: string, publicKeyPem: string): void {
+        if (!this.keyRegistry) this.keyRegistry = new KeyRegistry();
+        this.keyRegistry.registerActor(actor, publicKeyPem);
     }
 
     /** Register a module and initialize its state. Throws on a duplicate name. */
@@ -112,6 +139,21 @@ export class ModuleHost {
      * single bad command never crashes the apply loop.
      */
     apply(cmd: ModuleCommand, meta: { actor: string; requestId: string }): ModuleApplyResult {
+        // Actor signature verification (ADR-0018 pillar 7), if a registry is
+        // configured. This runs FIRST so a forged/tampered/unsigned command never
+        // reaches its reducer and never touches state or the outbox. Verification
+        // is a pure, deterministic function of the committed command + meta
+        // (canonical JSON + ed25519 verify, both deterministic), so every replica
+        // rejects identically — the cluster cannot diverge on a bad signature.
+        const denied = this.verifySignature(cmd, meta);
+        if (denied) {
+            // Audit the rejection at 401 for uniformity with other failure
+            // statuses (a forged command IS part of the history), but do NOT run
+            // the reducer and do NOT mutate state/outbox.
+            this.recordAudit(cmd, meta, denied.status);
+            return denied;
+        }
+
         const result = this.dispatch(cmd, meta);
         if (result.status === 200) {
             // Record each emitted effect into the outbox as `pending`, but only if
@@ -124,6 +166,46 @@ export class ModuleHost {
             }
         }
         return result;
+    }
+
+    /**
+     * Verify a caller command's actor signature (ADR-0018 pillar 7). Returns a
+     * deterministic 401 `ModuleApplyResult` to REJECT, or `undefined` to ALLOW.
+     *
+     * Back-compat: with no registry configured, always allows (returns
+     * `undefined`) — verification is opt-in, so existing unsigned flows are
+     * untouched. With a registry configured, a command is allowed ONLY if it
+     * carries a `sig` AND the actor has a registered key AND the signature
+     * verifies over the canonical LOGICAL payload (excluding `seed`). A missing
+     * signature, an unknown actor, or an invalid signature all reject — this is
+     * what stops a leader forging `actor`.
+     */
+    private verifySignature(
+        cmd: ModuleCommand,
+        meta: { actor: string; requestId: string },
+    ): ModuleApplyResult | undefined {
+        if (!this.keyRegistry) return undefined; // back-compat: no verification
+
+        if (!cmd.sig) {
+            return { status: 401, effects: [], message: 'Missing actor signature' };
+        }
+        const publicKey = this.keyRegistry.get(meta.actor);
+        if (!publicKey) {
+            return { status: 401, effects: [], message: `No registered key for actor "${meta.actor}"` };
+        }
+        // Reconstruct the EXACT logical payload the actor signed — the seed is
+        // deliberately excluded (the leader adds it after signing).
+        const payload: SignablePayload = {
+            module: cmd.module,
+            command: cmd.command,
+            input: cmd.input,
+            actor: meta.actor,
+            requestId: meta.requestId,
+        };
+        if (!verifyCommand(publicKey, payload, cmd.sig)) {
+            return { status: 401, effects: [], message: 'Invalid actor signature' };
+        }
+        return undefined; // verified
     }
 
     /**

@@ -54,6 +54,17 @@ export type Command =
           command: string;
           input: unknown;
           seed: { timestamp: string; nonce: string };
+          /**
+           * Optional ed25519 signature (base64) by the ORIGINATING ACTOR's key
+           * over the LOGICAL command only — `{ module, command, input, actor,
+           * requestId }`, NOT the leader-resolved `seed` (the actor signs before
+           * the leader picks the seed). Verified on the apply path against an
+           * actor->public-key registry when one is configured, so a malicious
+           * leader cannot forge `actor` (ADR-0018 pillar 7). Purely ADDITIVE:
+           * when no registry is configured, the signature is ignored and unsigned
+           * commands remain valid — existing behavior is unchanged.
+           */
+          sig?: string;
       };
 
 /** A single entry in the replicated log. */

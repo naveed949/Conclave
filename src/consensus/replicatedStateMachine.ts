@@ -4,6 +4,7 @@ import { ApplyResult, AuditEntry, Book, LogEntry } from './types';
 import { ModuleHost } from '../runtime/moduleHost';
 import { ModuleDefinition } from '../runtime/types';
 import { EMPTY_ROOT } from '../runtime/merkleAudit';
+import { KeyRegistry } from '../runtime/signing';
 
 const GENESIS_HASH = '0'.repeat(64);
 
@@ -80,13 +81,33 @@ export class ReplicatedStateMachine {
         for (const def of defs) this.host().register(def);
     }
 
+    /**
+     * Configure the actor signature registry (ADR-0018 pillar 7), delegating to
+     * the embedded host. Call on every node before start, with the SAME registry
+     * contents, so signature verification on the MODULE apply path converges. A
+     * node left without a registry verifies nothing — the back-compat default.
+     */
+    setKeyRegistry(reg: KeyRegistry): void {
+        this.host().setKeyRegistry(reg);
+    }
+
+    /** Authorize `publicKeyPem` as the signer for `actor` on this node's host. */
+    registerActorKey(actor: string, publicKeyPem: string): void {
+        this.host().registerActorKey(actor, publicKeyPem);
+    }
+
     /** Apply a committed log entry at `index`. Deterministic across nodes. */
     apply(index: number, entry: LogEntry): ApplyResult {
         const { command, meta } = entry;
 
         // Idempotency FIRST — covers MODULE commands too: a replayed requestId
         // yields the cached result without re-running the reducer (so a retried
-        // increment never double-applies).
+        // increment never double-applies). NOTE: failure results are cached too,
+        // including an auth 401 from signature verification (ADR-0018 pillar 7).
+        // Because a signature binds the requestId, a corrected retry re-signs and
+        // should carry a FRESH requestId — otherwise it is short-circuited to the
+        // cached 401 here until that entry is evicted (FIFO). Caching is uniform
+        // across replicas, so this stays convergent.
         if (meta?.requestId && this.seen.has(meta.requestId)) {
             return this.seen.get(meta.requestId)!;
         }
@@ -138,6 +159,11 @@ export class ReplicatedStateMachine {
                 command: command.command,
                 input: command.input,
                 seed: command.seed,
+                // Thread the actor signature through so the host can verify it
+                // against a configured registry (ADR-0018 pillar 7). Undefined
+                // when the command was built unsigned — then the host (if it has
+                // a registry) rejects 401, else ignores it (back-compat).
+                sig: command.sig,
             },
             { actor: meta?.actor ?? 'system', requestId: meta?.requestId ?? '' },
         );

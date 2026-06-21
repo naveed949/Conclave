@@ -156,6 +156,14 @@ export interface ModuleCommand {
     command: string;
     input: unknown;
     seed: Seed;
+    /**
+     * Optional actor signature (base64) over the LOGICAL command, threaded
+     * through so {@link ModuleHost.apply} can verify it against a configured
+     * `KeyRegistry` (ADR-0018 pillar 7). Excludes `seed` — the actor signs
+     * `{ module, command, input, actor, requestId }` before the leader resolves
+     * the seed. Ignored when no registry is configured (back-compat).
+     */
+    sig?: string;
 }
 
 /** The outcome of applying a `ModuleCommand` to a `ModuleHost`. */
