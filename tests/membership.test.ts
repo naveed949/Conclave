@@ -7,6 +7,15 @@ import { waitFor } from './helpers';
 
 const TIMERS = { electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 };
 
+// Several tests here run multiple membership changes + elections back-to-back,
+// each gated by its own `waitFor` (up to 2–3s apiece). Those internal budgets are
+// the real guards — they throw a clear "condition not met" if anything genuinely
+// stalls. Their SUM, however, can exceed Jest's 5s default test timeout when
+// workers run in parallel under CPU contention (the suite passes in isolation),
+// which is the only reason this test flaked. Give the suite ample headroom so a
+// slow-but-correct run is never mistaken for a hang.
+jest.setTimeout(15000);
+
 /**
  * A cluster whose registry + node set the test controls, so nodes can be added
  * to or removed from the configuration at runtime.
