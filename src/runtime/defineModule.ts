@@ -18,6 +18,21 @@ export interface DefineModuleOptions {
      * reserved `__lint` field for inspection/logging — it only skips the throw.
      */
     strict?: boolean;
+    /**
+     * Opt into the `vm` determinism sandbox (ADR-0018 pillars 2, 6 — M9). When
+     * set here it is stamped onto the returned definition so the host compiles the
+     * reducers into a frozen `vm` context at registration. Additive and
+     * default-off; the static lint stays on as defense-in-depth (a sandboxed
+     * reducer is self-contained and still passes the lint). See `sandbox.ts` for
+     * the honest "not a security boundary" scoping. WHOLE-STATE modules only.
+     */
+    sandbox?: boolean;
+    /**
+     * Wall-clock budget (ms) for the leader-side admission step meter. Only
+     * meaningful with `sandbox: true`. Stamped onto the returned definition.
+     * Default applied by the host: 50.
+     */
+    stepBudgetMs?: number;
 }
 
 /**
@@ -44,10 +59,19 @@ export type LintedModuleDefinition<S> = ModuleDefinition<S> & { __lint?: string[
  * escape hatch for a vetted reducer.
  */
 export function defineModule<S>(
-    def: ModuleDefinition<S>,
+    rawDef: ModuleDefinition<S>,
     opts: DefineModuleOptions = {},
 ): LintedModuleDefinition<S> {
     const strict = opts.strict ?? true;
+    // Stamp the sandbox opt-in (ADR-0018 M9) from the options onto the definition
+    // so the host sees it at registration. A field set directly on `def` wins over
+    // the option (explicit on the definition is the more specific intent); options
+    // are the ergonomic place to pass it alongside `strict`.
+    const def: ModuleDefinition<S> = { ...rawDef };
+    const sandbox = rawDef.sandbox ?? opts.sandbox;
+    if (sandbox !== undefined) def.sandbox = sandbox;
+    const stepBudgetMs = rawDef.stepBudgetMs ?? opts.stepBudgetMs;
+    if (stepBudgetMs !== undefined) def.stepBudgetMs = stepBudgetMs;
     if (!def.name || def.name.trim() === '') {
         throw new Error('Module definition requires a non-empty name');
     }

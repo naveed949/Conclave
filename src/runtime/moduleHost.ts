@@ -3,6 +3,13 @@ import { moduleCodeHash } from './codeHash';
 import { canonicalBytes } from './determinism';
 import { KeyedModuleDefinition } from './keyedModule';
 import { AuditLeaf, MerkleAudit, MerkleProof } from './merkleAudit';
+import {
+    BudgetExceededError,
+    CompiledReducer,
+    compileReducer,
+    runReducer,
+    runReducerWithBudget,
+} from './sandbox';
 import { KeyRegistry, SignablePayload, verifyCommand } from './signing';
 import { MemoryStateStore, StateStore, StoreView } from './stateStore';
 import {
@@ -21,6 +28,8 @@ const DEFAULT_MAX_EFFECTS = 16;
 const DEFAULT_MAX_RESULT_BYTES = 64 * 1024;
 /** Default ceiling on the buffered writes a single KEYED command may make. */
 const DEFAULT_MAX_WRITES = 256;
+/** Default wall-clock step budget (ms) for the leader-side admission dry-run. */
+const DEFAULT_STEP_BUDGET_MS = 50;
 
 /**
  * A registrable module: either a whole-state `ModuleDefinition` (no `kind`, the
@@ -81,6 +90,15 @@ export class ModuleHost {
      */
     private readonly codeHashes = new Map<string, string>();
     /**
+     * Compiled sandbox reducers for `sandbox: true` whole-state modules (ADR-0018
+     * M9), keyed `module/command`. Built ONCE at `register()` by re-evaluating
+     * each reducer's source inside a fresh `vm` context with a frozen safe-global
+     * set. Present only for sandboxed modules; absent modules dispatch directly as
+     * before. Both the apply path (`runReducer`, no timeout) and leader-side
+     * admission (`runReducerWithBudget`, timeout) drive the SAME compiled handle.
+     */
+    private readonly compiled = new Map<string, CompiledReducer>();
+    /**
      * The Merkle audit accumulator (ADR-0018 pillar 5). Replicated state: it is
      * derived purely from the applied command stream, so two hosts fed the same
      * stream produce the same `auditRoot()`. Folded into `snapshot()`/`restore()`.
@@ -101,6 +119,13 @@ export class ModuleHost {
     private readonly maxEffects: number;
     private readonly maxResultBytes: number;
     private readonly maxWrites: number;
+    /**
+     * Default wall-clock step budget (ms) for the leader-side admission meter
+     * (ADR-0018 pillar 6 — M9), used when a sandboxed module does not set its own
+     * `stepBudgetMs`. Only the admission dry-run consults it; the apply path is
+     * always timeout-free.
+     */
+    private readonly stepBudgetMs: number;
 
     /**
      * Optional actor->public-key registry (ADR-0018 pillar 7). When SET, every
@@ -117,6 +142,7 @@ export class ModuleHost {
         this.maxEffects = opts.maxEffects ?? DEFAULT_MAX_EFFECTS;
         this.maxResultBytes = opts.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
         this.maxWrites = opts.maxWrites ?? DEFAULT_MAX_WRITES;
+        this.stepBudgetMs = opts.stepBudgetMs ?? DEFAULT_STEP_BUDGET_MS;
     }
 
     /**
@@ -156,6 +182,16 @@ export class ModuleHost {
         if (this.modules.has(def.name)) {
             throw new Error(`Module "${def.name}" is already registered`);
         }
+        // Sandbox is a WHOLE-STATE feature for this milestone (ADR-0018 M9):
+        // sandboxing keyed StoreView-mutating reducers is out of scope, so reject
+        // the combination at registration rather than silently ignore the flag.
+        if (isKeyed(def) && (def as { sandbox?: boolean }).sandbox) {
+            throw new Error(
+                `Module "${def.name}": the determinism sandbox (sandbox: true) is supported ` +
+                    `for whole-state modules only in this milestone, not keyed modules`,
+            );
+        }
+
         this.modules.set(def.name, def);
         if (isKeyed(def)) {
             // Keyed module: give it an empty record store. The default in-memory
@@ -163,6 +199,15 @@ export class ModuleHost {
             this.stores.set(def.name, new MemoryStateStore());
         } else {
             this.states.set(def.name, def.initialState());
+            // If the module opted into the sandbox, compile each reducer ONCE now
+            // into its own frozen vm context (ADR-0018 M9). A non-self-contained
+            // reducer source (e.g. method-shorthand) fails loudly here, at
+            // registration, rather than at first dispatch.
+            if (def.sandbox) {
+                for (const [name, reducer] of Object.entries(def.commands)) {
+                    this.compiled.set(`${def.name}/${name}`, compileReducer(reducer.toString()));
+                }
+            }
         }
         // Stamp the module's logic version now; every leaf it later produces
         // records this hash (ADR-0018 pillar 5).
@@ -209,6 +254,74 @@ export class ModuleHost {
             }
         }
         return result;
+    }
+
+    /**
+     * Leader-side admission / step meter (ADR-0018 pillar 6 "gas" — M9). A
+     * pre-log DRY RUN: the LEADER calls this BEFORE submitting a command to the
+     * log; if it returns `ok: false`, the command is rejected and never enters the
+     * log. Followers do NOT re-admit — under the CFT trust model they trust that a
+     * committed entry was already admitted by the leader, which is exactly why the
+     * apply path stays timeout-free and deterministic.
+     *
+     * For a SANDBOXED module it runs the reducer inside the vm with a wall-clock
+     * `stepBudgetMs` timeout against a CLONE of current state — NO mutation, NO
+     * commit, NO effects enqueued, NO audit. A runaway reducer (e.g. an infinite
+     * loop) trips the vm timeout and is reported as `503` (`BudgetExceededError`);
+     * any other reducer throw is reported as `500` — the SAME status the apply
+     * path (`dispatch`) gives that deterministic throw, so admission and apply
+     * stay in status parity. Because the dry run touches a clone and discards its
+     * result, the timeout's non-determinism never reaches replicated state.
+     *
+     * For a NON-SANDBOXED module admission is a NO-OP that returns ok: the step
+     * meter is a sandbox feature (a direct-execution reducer cannot be safely
+     * interrupted by the vm), and those modules already gate fan-out/size on the
+     * deterministic apply path. Unknown module/command also admit ok and surface
+     * their 404 on apply, keeping admission strictly about the CPU/step budget.
+     */
+    admit(
+        cmd: ModuleCommand,
+        meta: { actor: string; requestId: string },
+    ): { ok: true } | { ok: false; status: number; message: string } {
+        const compiled = this.compiled.get(`${cmd.module}/${cmd.command}`);
+        if (!compiled) {
+            // Not a sandboxed command (non-sandboxed module, keyed module, or
+            // unknown module/command): nothing to meter, admit and let apply run.
+            return { ok: true };
+        }
+
+        const def = this.modules.get(cmd.module) as ModuleDefinition<unknown>;
+        const budgetMs = def.stepBudgetMs ?? this.stepBudgetMs;
+        const ctx = createContext(cmd.seed, meta);
+        // Clone current state so the dry run cannot mutate committed state even if
+        // the reducer mutates its argument in place before looping/throwing.
+        const working = deepClone(this.states.get(cmd.module));
+
+        try {
+            runReducerWithBudget(compiled, working, cmd.input, ctx, budgetMs);
+            return { ok: true };
+        } catch (err) {
+            if (err instanceof BudgetExceededError) {
+                return {
+                    ok: false,
+                    status: 503,
+                    message:
+                        `Command "${cmd.command}" on module "${cmd.module}" exceeded the ` +
+                        `${budgetMs}ms step budget and was rejected before entering the log`,
+                };
+            }
+            // Any other reducer error during admission: reject too, so a command
+            // that would deterministically 500 on apply is caught at the edge.
+            // Report 500 (NOT 400) for admit/apply STATUS PARITY: the apply path
+            // (`dispatch`) maps the same deterministic reducer throw to 500, so the
+            // pre-log gate must surface the identical status it would get on apply.
+            const message = err instanceof Error ? err.message : String(err);
+            return {
+                ok: false,
+                status: 500,
+                message: `Command "${cmd.command}" on module "${cmd.module}" failed admission: ${message}`,
+            };
+        }
     }
 
     /**
@@ -287,9 +400,19 @@ export class ModuleHost {
         // of its outcome (success, business-failure status, or thrown→500). The
         // earlier unknown-module/unknown-command 404s returned before this point
         // and are intentionally NOT audited — no logic ran for them.
+        // For a sandboxed module, run the reducer inside its frozen vm context on
+        // the APPLY path with NO timeout (ADR-0018 M9): the call must be a pure,
+        // deterministic function of (state, input, ctx) so every replica computes
+        // the same next-state. A banned global (Date, Math.random, …) is absent in
+        // the sandbox and throws here, caught below as a 500 — structurally, not
+        // by the lint. Non-sandboxed modules run the reducer directly, as before.
+        const sandboxed = this.compiled.get(`${cmd.module}/${cmd.command}`);
+
         let outcome: ModuleApplyResult;
         try {
-            const result = reducer(working, cmd.input, ctx);
+            const result = sandboxed
+                ? runReducer(sandboxed, working, cmd.input, ctx)
+                : reducer(working, cmd.input, ctx);
             const effects = result.effects ?? [];
 
             // Deterministic resource bound (ADR-0018 pillar 6). Computed AFTER the

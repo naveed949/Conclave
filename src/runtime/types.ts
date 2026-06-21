@@ -135,6 +135,33 @@ export interface ModuleDefinition<S> {
     initialState: () => S;
     commands: Record<string, Reducer<S>>;
     queries?: Record<string, Query<S>>;
+    /**
+     * Opt into the `vm` determinism sandbox (ADR-0018 pillars 2, 6 — M9). OFF by
+     * default: existing whole-state modules keep their current DIRECT reducer
+     * execution. When `true`, the host re-compiles each command reducer into a
+     * fresh `vm` context with a frozen safe-global set (no `Date`/`Math.random`/
+     * `crypto`/timers/…) at registration, so determinism is enforced
+     * STRUCTURALLY at runtime rather than only by the static lint — a reducer
+     * that touches a banned global throws even if the lint were bypassed.
+     *
+     * SCOPE (this milestone): WHOLE-STATE modules only. A keyed module passed
+     * with `sandbox: true` is rejected at registration — sandboxing keyed
+     * `StoreView`-mutating reducers is out of scope. Sandboxed reducers must be
+     * SELF-CONTAINED arrow/`function` expressions (see {@link compileReducer}).
+     *
+     * HONEST CAVEAT: `vm` is a determinism aid, NOT a security boundary against
+     * malicious code (Node's docs say so). See `sandbox.ts`.
+     */
+    sandbox?: boolean;
+    /**
+     * Wall-clock budget (ms) for the LEADER-SIDE admission step meter (ADR-0018
+     * pillar 6 "gas"). Only consulted for a `sandbox` module. The leader's
+     * pre-log `admit()` dry-run runs the reducer inside the vm with this timeout
+     * and rejects a runaway (e.g. an infinite loop) BEFORE it enters the log. The
+     * apply path NEVER uses this — followers trust committed entries are bounded
+     * (CFT), keeping apply deterministic and timeout-free. Default: 50.
+     */
+    stepBudgetMs?: number;
 }
 
 /**
@@ -211,4 +238,15 @@ export interface ModuleHostOptions {
      * identically on every replica. Default: 256.
      */
     maxWrites?: number;
+    /**
+     * Default wall-clock step budget (ms) for the LEADER-SIDE admission meter
+     * (ADR-0018 pillar 6 "gas" — M9), used for a `sandbox` module that does not
+     * set its own `stepBudgetMs`. ONLY the leader's pre-log `admit()` dry-run uses
+     * this timeout, to reject a runaway reducer before it enters the log; the
+     * apply path NEVER uses a timeout (it must stay deterministic — followers
+     * trust committed entries are already bounded under the CFT model). Unlike the
+     * other bounds here, this is NOT deterministic state — it is an edge-side
+     * admission gate whose result is discarded. Default: 50.
+     */
+    stepBudgetMs?: number;
 }

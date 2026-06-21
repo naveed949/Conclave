@@ -66,6 +66,16 @@ export const BANNED: { pattern: RegExp; reason: string }[] = [
     { pattern: /\bperformance\s*\./, reason: 'performance. (wall-clock timing)' },
     // Reflection: a common way to reach banned globals indirectly.
     { pattern: /\bReflect\s*\./, reason: 'Reflect. (reflective global access)' },
+    // Locale / ICU formatting & collation: results depend on the host locale and
+    // ICU build, so two replicas can format/compare differently from the same
+    // input. Match the METHOD access (`.toLocaleString`, `.localeCompare`, any
+    // `.toLocale*(`) and the `Intl` namespace access — never a bare identifier
+    // that merely shares a name. The sandbox neutralizes these structurally; this
+    // is the defense-in-depth lint for non-sandboxed modules.
+    { pattern: /\.\s*toLocaleString\b/, reason: '.toLocaleString (locale-dependent formatting; format deterministically)' },
+    { pattern: /\.\s*localeCompare\b/, reason: '.localeCompare (locale-dependent collation; compare deterministically)' },
+    { pattern: /\.\s*toLocale[A-Za-z]*\s*\(/, reason: '.toLocale*( (locale-dependent; non-deterministic)' },
+    { pattern: /\bIntl\s*\./, reason: 'Intl. (locale/ICU formatting; non-deterministic)' },
 ];
 
 /**
