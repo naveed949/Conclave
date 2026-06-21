@@ -1,3 +1,4 @@
+import { Consensus } from './consensus';
 import { ReplicatedStateMachine, RsmSnapshot } from './replicatedStateMachine';
 import { StateMachine } from './stateMachine';
 import { MemoryStorage, RaftStorage, PersistentState } from './storage';
@@ -91,7 +92,7 @@ export class RaftNode<
     C extends AppCommand = AppCommand,
     T = unknown,
     SM extends StateMachine<C, T> = StateMachine<C, T>,
-> implements RpcHandler {
+> implements Consensus<C, T, SM>, RpcHandler {
     readonly id: string;
     private readonly selfPeer: PeerInfo;
     private readonly transport: Transport;

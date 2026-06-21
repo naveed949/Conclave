@@ -1,9 +1,10 @@
 import { CommandMeta } from '../consensus/types';
 import { NotLeaderError } from '../consensus/raftNode';
+import { ConsensusOf } from '../consensus/consensus';
 import { buildEffectResultCommand } from './command';
 import { EffectExecutor } from './effectExecutor';
-import { ModuleNode } from './moduleStateMachine';
-import { EffectHandler } from './types';
+import { ModuleStateMachine } from './moduleStateMachine';
+import { EffectHandler, ModuleAppCommand } from './types';
 
 /** Default tick interval (ms) for the leader's outbox drain loop. */
 const DEFAULT_INTERVAL_MS = 25;
@@ -41,7 +42,10 @@ export class EffectDriver {
     private draining = false;
 
     constructor(
-        private readonly node: ModuleNode,
+        // Depends on the `Consensus` seam (ADR-0021/M13), not the concrete node:
+        // it only uses `submit`/`isLeader`/`app`, so any engine implementing
+        // `Consensus` drives effects unchanged.
+        private readonly node: ConsensusOf<ModuleAppCommand, unknown, ModuleStateMachine>,
         handlers: Record<string, EffectHandler>,
         opts: { intervalMs?: number } = {},
     ) {

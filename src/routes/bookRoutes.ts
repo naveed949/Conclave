@@ -1,8 +1,10 @@
 import express from 'express';
-import { BookNode } from '../models/bookStateMachine';
+import { Consensus } from '../consensus/consensus';
+import { Book, BookCommand } from '../models/book';
+import { BookStateMachine } from '../models/bookStateMachine';
 import { createBookController } from '../controllers/bookController';
 
-export default function bookRoutes(node: BookNode) {
+export default function bookRoutes(node: Consensus<BookCommand, Book, BookStateMachine>) {
     const router = express.Router();
     const c = createBookController(node);
 

@@ -5,6 +5,10 @@ import { AppCommand, ApplyResult, CommandMeta } from '../consensus/types';
  * The minimal node surface the router needs: ask who leads, and submit to it.
  * Structural so any `RaftNode<C, T>` (e.g. a {@link ModuleNode}) fits without the
  * router depending on the concrete node/state-machine types.
+ *
+ * Note: this `{ isLeader, submit }` shape is a strict SUBSET of the `Consensus`
+ * seam (ADR-0021) — the router was already decoupled from the concrete node via
+ * structural typing, so any `Consensus<C, T, A>` satisfies it unchanged.
  */
 export interface ShardNode<C extends AppCommand, T> {
     isLeader(): boolean;
