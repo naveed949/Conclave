@@ -6,13 +6,18 @@ import { ReplicatedStateMachine } from '../src/consensus/replicatedStateMachine'
 import { LogEntry } from '../src/consensus/types';
 import { MetricsRegistry } from '../src/platform/metrics';
 import { createApp } from '../src/app';
-import { buildAddCommand } from '../src/models/book';
+import { BookCommand, buildAddCommand } from '../src/models/book';
+import { BookNode, BookStateMachine } from '../src/models/bookStateMachine';
 import { waitFor } from './helpers';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-const addEntry = (term: number, isbn: string, requestId: string): LogEntry => ({
+/** A book ReplicatedStateMachine (the substrate wrapping the book application). */
+const bookRsm = (dedupLimit?: number) =>
+    new ReplicatedStateMachine(new BookStateMachine(), dedupLimit);
+
+const addEntry = (term: number, isbn: string, requestId: string): LogEntry<BookCommand> => ({
     term,
     command: buildAddCommand({ title: 'T', author: 'A', publisher: 'P', isbn, copies: 1 }),
     meta: { requestId, actor: 'tester', timestamp: '2026-01-01T00:00:00.000Z' },
@@ -20,7 +25,7 @@ const addEntry = (term: number, isbn: string, requestId: string): LogEntry => ({
 
 describe('Audit log (hash-chained, tamper-evident)', () => {
     it('records every committed change and verifies intact', () => {
-        const sm = new ReplicatedStateMachine();
+        const sm = bookRsm();
         sm.apply(1, addEntry(1, 'a-1', 'r1'));
         sm.apply(2, addEntry(1, 'a-2', 'r2'));
 
@@ -32,7 +37,7 @@ describe('Audit log (hash-chained, tamper-evident)', () => {
     });
 
     it('detects tampering with a historical entry', () => {
-        const sm = new ReplicatedStateMachine();
+        const sm = bookRsm();
         sm.apply(1, addEntry(1, 'b-1', 'r1'));
         sm.apply(2, addEntry(1, 'b-2', 'r2'));
 
@@ -45,7 +50,7 @@ describe('Audit log (hash-chained, tamper-evident)', () => {
     });
 
     it('does not audit internal NOOP entries', () => {
-        const sm = new ReplicatedStateMachine();
+        const sm = bookRsm();
         sm.apply(1, { term: 1, command: { type: 'NOOP' } });
         expect(sm.getAuditLog()).toHaveLength(0);
     });
@@ -53,7 +58,7 @@ describe('Audit log (hash-chained, tamper-evident)', () => {
 
 describe('Idempotency (exactly-once on retried requestId)', () => {
     it('returns the cached result without re-applying', () => {
-        const sm = new ReplicatedStateMachine();
+        const sm = bookRsm();
         const entry = addEntry(1, 'dup-1', 'same-request');
         const first = sm.apply(1, entry);
         const second = sm.apply(2, entry); // replay
@@ -66,7 +71,7 @@ describe('Idempotency (exactly-once on retried requestId)', () => {
 
 describe('Idempotency cache is bounded (deterministic FIFO eviction)', () => {
     it('caps the cache and re-applies a requestId evicted past the limit', () => {
-        const sm = new ReplicatedStateMachine(2); // remember at most 2 requestIds
+        const sm = bookRsm(2); // remember at most 2 requestIds
         expect(sm.apply(1, addEntry(1, 'a-1', 'r1')).status).toBe(201);
         expect(sm.apply(2, addEntry(1, 'a-2', 'r2')).status).toBe(201);
         expect(sm.apply(3, addEntry(1, 'a-3', 'r3')).status).toBe(201);
@@ -86,8 +91,8 @@ describe('Idempotency cache is bounded (deterministic FIFO eviction)', () => {
     });
 
     it('evicts identically on every node (same sequence -> same cache)', () => {
-        const a = new ReplicatedStateMachine(3);
-        const b = new ReplicatedStateMachine(3);
+        const a = bookRsm(3);
+        const b = bookRsm(3);
         for (let i = 1; i <= 6; i++) {
             const entry = addEntry(1, `k-${i}`, `req-${i}`);
             a.apply(i, entry);
@@ -100,10 +105,10 @@ describe('Idempotency cache is bounded (deterministic FIFO eviction)', () => {
 });
 
 describe('Persistence (state survives restart)', () => {
-    const buildNode = (storage: MemoryStorage) => {
+    const buildNode = (storage: MemoryStorage): BookNode => {
         const registry = new Map<string, RpcHandler>();
         const node = new RaftNode(
-            { id: 'n1', peers: [], storage, electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 },
+            { id: 'n1', peers: [], stateMachine: new BookStateMachine(), storage, electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 },
             new LocalTransport(registry),
         );
         registry.set('n1', node);
@@ -141,14 +146,14 @@ describe('Persistence (state survives restart)', () => {
 });
 
 describe('Observability & audit HTTP endpoints', () => {
-    let node: RaftNode;
+    let node: BookNode;
     let metrics: MetricsRegistry;
     let app: ReturnType<typeof createApp>;
 
     beforeAll(async () => {
         const registry = new Map<string, RpcHandler>();
         node = new RaftNode(
-            { id: 'n1', peers: [], electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 },
+            { id: 'n1', peers: [], stateMachine: new BookStateMachine(), electionMinMs: 50, electionMaxMs: 100, heartbeatMs: 20 },
             new LocalTransport(registry),
         );
         registry.set('n1', node);

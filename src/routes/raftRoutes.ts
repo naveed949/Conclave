@@ -1,11 +1,14 @@
 import express, { Request, Response } from 'express';
 import { RaftNode, NotLeaderError, MembershipError } from '../consensus/raftNode';
-import { CommandMeta } from '../consensus/types';
+import { StateMachine } from '../consensus/stateMachine';
+import { AppCommand, CommandMeta } from '../consensus/types';
 import { getContext } from '../platform/requestContext';
 import { forwardToLeader, isForwarded } from '../platform/forward';
 
 /** Internal cluster endpoints: peer RPCs, membership admin, and a status view. */
-export default function raftRoutes(node: RaftNode) {
+export default function raftRoutes<C extends AppCommand, T, SM extends StateMachine<C, T>>(
+    node: RaftNode<C, T, SM>,
+) {
     const router = express.Router();
 
     router.post('/request-vote', (req, res) => {
@@ -44,8 +47,8 @@ export default function raftRoutes(node: RaftNode) {
 }
 
 /** Run a membership change on the leader (forwarding from a follower) and relay the outcome. */
-async function applyMembership(
-    node: RaftNode,
+async function applyMembership<C extends AppCommand, T, SM extends StateMachine<C, T>>(
+    node: RaftNode<C, T, SM>,
     req: Request,
     res: Response,
     change: { add?: { id: string; url: string }; remove?: string },

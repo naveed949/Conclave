@@ -1,8 +1,8 @@
 import express from 'express';
-import { RaftNode } from '../consensus/raftNode';
+import { BookNode } from '../models/bookStateMachine';
 import { createBookController } from '../controllers/bookController';
 
-export default function bookRoutes(node: RaftNode) {
+export default function bookRoutes(node: BookNode) {
     const router = express.Router();
     const c = createBookController(node);
 

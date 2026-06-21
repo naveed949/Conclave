@@ -1,8 +1,24 @@
 import { PeerInfo } from './types';
-import { RaftConfig } from './raftNode';
 
 /**
- * Build a node's Raft configuration from environment variables.
+ * Environment-derived node options: everything needed to configure a node except
+ * the application state machine and the runtime collaborators (logger, metrics,
+ * storage, transport), which the process entry point supplies. Spread these into
+ * a {@link RaftConfig} alongside a `stateMachine`.
+ */
+export interface NodeEnvOptions {
+    id: string;
+    peers: PeerInfo[];
+    selfUrl?: string;
+    electionMinMs?: number;
+    electionMaxMs?: number;
+    heartbeatMs?: number;
+    snapshotThreshold?: number;
+    dedupLimit?: number;
+}
+
+/**
+ * Build a node's environment-derived options from environment variables.
  *
  *   NODE_ID         unique id for this node           (default: "node1")
  *   PORT            HTTP port this node listens on     (default: 3000)
@@ -11,7 +27,7 @@ import { RaftConfig } from './raftNode';
  *   ELECTION_MIN_MS / ELECTION_MAX_MS / HEARTBEAT_MS   timer tuning (optional)
  *   RAFT_DEBUG      "true" to log role changes         (default: false)
  */
-export function loadRaftConfig(env: NodeJS.ProcessEnv = process.env): RaftConfig {
+export function loadRaftConfig(env: NodeJS.ProcessEnv = process.env): NodeEnvOptions {
     const id = env.NODE_ID || 'node1';
     const peers: PeerInfo[] = (env.PEERS || '')
         .split(',')
