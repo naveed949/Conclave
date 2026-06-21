@@ -28,16 +28,28 @@ book demo.
 
 ## Pieces
 
-| File | Role |
-|------|------|
-| `types.ts` | `ModuleDefinition`, `Reducer`, `ReducerContext`, `EffectIntent`, `Seed`, audit/outbox types |
-| `defineModule.ts` | Declarative module definition + validation (rejects `__`-reserved names) |
-| `context.ts` | `resolveSeed()` (the sole edge entropy site) and the deterministic `ReducerContext` |
-| `moduleHost.ts` | `ModuleHost`: dispatch commands to pure reducers, queries, outbox, Merkle audit, snapshot/restore |
-| `effectExecutor.ts` | Post-commit executor: runs effect handlers exactly-once and submits results back |
-| `merkleAudit.ts` | Append-only Merkle accumulator: inclusion proofs + domain-separated root |
-| `codeHash.ts` | Deterministic module code-version hash (POC stand-in for hashing the built artifact) |
-| `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle) |
+| File | Role | Milestone |
+|------|------|-----------|
+| `types.ts` | `ModuleDefinition`, `Reducer`, `ReducerContext`, `EffectIntent`, `Seed`, audit/outbox/host-option types | M1–M5 |
+| `defineModule.ts` | Declarative module definition + validation (rejects `__`-reserved names; strict determinism lint) | M1, M5 |
+| `context.ts` | `resolveSeed()` (the sole edge entropy site) and the deterministic `ReducerContext` | M1 |
+| `moduleHost.ts` | `ModuleHost`: dispatch to pure reducers, queries, outbox, Merkle audit, resource bounds, signature check, snapshot/restore | M1–M7 |
+| `effectExecutor.ts` | Post-commit executor: runs effect handlers exactly-once and submits results back | M2 |
+| `merkleAudit.ts` | Append-only Merkle accumulator: inclusion proofs + domain-separated root | M3 |
+| `codeHash.ts` | Deterministic module code-version hash (POC stand-in for hashing the built artifact) | M3 |
+| `canonical.ts` | Single shared canonical (sorted-key) JSON serializer used by every hash/size path | M5 |
+| `determinism.ts` | Static determinism lint + `canonicalBytes` for the deterministic resource bound | M5 |
+| `command.ts` | Leader-side `buildModuleCommand` / `buildSignedModuleCommand` (resolve seed, optionally sign) | M4, M7 |
+| `signing.ts` | ed25519 sign/verify over the logical payload + `KeyRegistry` (actor→authorized key) | M7 |
+| `projection.ts` / `projectionHost.ts` | CQRS read side: derived, rebuildable read model off the apply path | M6 |
+| `modules/` | Demo modules: `counter`, `notes` (leader-resolved id/time via `ctx`), `payments` (effect → settle) | M1–M2 |
+| `projections/` | Demo projection: `noteIndex` (notes indexed by actor) | M6 |
+
+The runtime rides **real consensus** (M4): a generic `MODULE` command in
+`src/consensus/types.ts` routes through `ReplicatedStateMachine` to an embedded
+`ModuleHost`, so a multi-node cluster converges on identical module state and
+audit root. See `tests/runtime/consensusIntegration.test.ts` and
+`tests/runtime/signing.test.ts` for the end-to-end proofs.
 
 ## Writing a module
 

@@ -162,10 +162,10 @@ preserving a backend principle.
 
 ## Prototype status (2026-06-20)
 
-A working prototype of the deterministic-core pillars lives under `src/runtime/`
-(see [`src/runtime/README.md`](../../src/runtime/README.md)). It is layered on
-top of the existing consensus core without modifying it, and was built in three
-reviewed milestones:
+A working prototype lives under `src/runtime/` (see
+[`src/runtime/README.md`](../../src/runtime/README.md)), built and reviewed in
+seven incremental milestones. The first three are pure runtime layered on top of
+the consensus core; M4–M7 wire it into real Raft and harden it.
 
 - **M1 — Module SDK + deterministic runtime (pillars 1–2).** `defineModule`, a
   `ModuleHost` that dispatches commands to pure reducers, and a deterministic
@@ -182,12 +182,31 @@ reviewed milestones:
   accumulator with O(log n) inclusion proofs and a domain-separated root, plus a
   per-command module code-version hash so the audit proves which logic version
   produced each result.
+- **M4 — Consensus wiring (pillars 1–3 end-to-end).** A generic `MODULE` command
+  in the consensus `Command` union (carrying a leader-resolved seed) routes
+  through `ReplicatedStateMachine` to an embedded `ModuleHost`. A 3-node cluster
+  converges on identical module state *and* Merkle audit root, with MODULE
+  idempotency and the seed flowing through the log. The non-MODULE (book) path is
+  byte-for-byte unchanged.
+- **M5 — Determinism enforcement + resource bounds (pillars 2, 6).** A static
+  determinism lint rejects reducers that touch non-deterministic globals
+  (`defineModule` strict-by-default), and a deterministic `413` resource bound
+  caps effect count and result size — rejected uniformly on every replica. A
+  shared canonical serializer removes the audit/size-bound drift hazard.
+- **M6 — CQRS read projections (pillar 4, reads).** A derived, rebuildable read
+  model folded from the committed command stream, answering indexed queries the
+  raw module state doesn't — strictly off the apply path; `rebuild()` proves it
+  is a cache, not a source of truth (ADR-0002 upheld).
+- **M7 — Signed commands (pillar 7).** Module commands are ed25519-signed by the
+  originating actor over the *logical* payload (not the leader's seed); every node
+  verifies on the apply path against an actor→key registry, so a forged `actor` is
+  rejected `401` identically on all nodes. Opt-in and fully backward-compatible.
 
-**Deferred (not in the prototype):** consensus wiring of a generic module command
-into `RaftNode` (the runtime is exercised via deterministic replay, which proves
-the replicated-state-machine property without touching the core); pluggable
-state-store backend and CQRS read projections (pillar 4); multi-Raft sharding and
-the step-budget "gas" guard (pillars 4, 6); signed commands and an optional BFT
-swap (pillar 7); and a `vm`-level determinism sandbox (the prototype relies on
-`ctx` injection plus the determinism convergence tests). These remain the natural
-next increments of the roadmap above.
+**Remaining frontier (still deferred):** the pluggable embedded state-store
+backend (the *state-larger-than-RAM* half of pillar 4); **multi-Raft sharding**
+with cross-shard sagas/2PC (the write-scaling half of pillars 4/6) — genuinely
+large; a preemptive **CPU/step "gas" meter** and a true **`vm`/worker determinism
+sandbox** (M5 delivers static-lint + a deterministic size bound, which need a
+sandbox to become airtight); and an optional **BFT consensus swap** (pillar 7)
+for multi-party trustlessness beyond the single trust domain. These are the next
+increments of the roadmap above.
