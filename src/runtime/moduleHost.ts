@@ -1,8 +1,10 @@
 import { createContext } from './context';
 import { moduleCodeHash } from './codeHash';
 import { canonicalBytes } from './determinism';
+import { KeyedModuleDefinition } from './keyedModule';
 import { AuditLeaf, MerkleAudit, MerkleProof } from './merkleAudit';
 import { KeyRegistry, SignablePayload, verifyCommand } from './signing';
+import { MemoryStateStore, StateStore, StoreView } from './stateStore';
 import {
     EffectIntent,
     EffectResultEntry,
@@ -17,6 +19,21 @@ import {
 const DEFAULT_MAX_EFFECTS = 16;
 /** Default ceiling on the canonical byte size of a command's next-state (64 KiB). */
 const DEFAULT_MAX_RESULT_BYTES = 64 * 1024;
+/** Default ceiling on the buffered writes a single KEYED command may make. */
+const DEFAULT_MAX_WRITES = 256;
+
+/**
+ * A registrable module: either a whole-state `ModuleDefinition` (no `kind`, the
+ * original model) or a key-oriented `KeyedModuleDefinition` (`kind: 'keyed'`,
+ * ADR-0018 pillar 4). The host discriminates on `kind`, defaulting absent to
+ * whole-state for back-compat.
+ */
+export type AnyModuleDefinition = ModuleDefinition<unknown> | KeyedModuleDefinition;
+
+/** Narrow an `AnyModuleDefinition` to the keyed variant. */
+function isKeyed(def: AnyModuleDefinition): def is KeyedModuleDefinition {
+    return (def as KeyedModuleDefinition).kind === 'keyed';
+}
 
 /**
  * Deep-clone via JSON round-trip. Used so snapshots are decoupled from live
@@ -38,9 +55,17 @@ function deepClone<T>(value: T): T {
  * identical state — the property the convergence test asserts.
  */
 export class ModuleHost {
-    private readonly modules = new Map<string, ModuleDefinition<unknown>>();
-    /** Live per-module state, keyed by module name. */
+    private readonly modules = new Map<string, AnyModuleDefinition>();
+    /** Live per-module WHOLE-STATE blob, keyed by module name. */
     private readonly states = new Map<string, unknown>();
+    /**
+     * Per-module record store for KEYED modules (ADR-0018 pillar 4), keyed by
+     * module name. A keyed module has an entry here and NONE in `states`; a
+     * whole-state module is the reverse. The default `MemoryStateStore` is the
+     * in-memory backend; the `StateStore` seam is where a persistent embedded
+     * KV/LSM store would drop in (snapshots becoming store checkpoints).
+     */
+    private readonly stores = new Map<string, StateStore>();
     /**
      * The deterministic outbox (ADR-0018 pillar 3), keyed by `idempotencyKey`.
      * Every host derives it from the same committed command stream, so it is
@@ -75,6 +100,7 @@ export class ModuleHost {
      */
     private readonly maxEffects: number;
     private readonly maxResultBytes: number;
+    private readonly maxWrites: number;
 
     /**
      * Optional actor->public-key registry (ADR-0018 pillar 7). When SET, every
@@ -90,6 +116,7 @@ export class ModuleHost {
     constructor(opts: ModuleHostOptions = {}) {
         this.maxEffects = opts.maxEffects ?? DEFAULT_MAX_EFFECTS;
         this.maxResultBytes = opts.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
+        this.maxWrites = opts.maxWrites ?? DEFAULT_MAX_WRITES;
     }
 
     /**
@@ -107,8 +134,13 @@ export class ModuleHost {
         this.keyRegistry.registerActor(actor, publicKeyPem);
     }
 
-    /** Register a module and initialize its state. Throws on a duplicate name. */
-    register(def: ModuleDefinition<any>): void {
+    /**
+     * Register a module and initialize its state. Accepts BOTH a whole-state
+     * `ModuleDefinition` and a key-oriented `KeyedModuleDefinition` (discriminated
+     * on `kind`, ADR-0018 pillar 4); a keyed module gets its own `StateStore`
+     * instead of a whole-state blob. Throws on a duplicate name.
+     */
+    register(def: AnyModuleDefinition): void {
         if (!def.name || def.name.trim() === '') {
             throw new Error('Module definition requires a non-empty name');
         }
@@ -124,11 +156,22 @@ export class ModuleHost {
         if (this.modules.has(def.name)) {
             throw new Error(`Module "${def.name}" is already registered`);
         }
-        this.modules.set(def.name, def as ModuleDefinition<unknown>);
-        this.states.set(def.name, def.initialState());
+        this.modules.set(def.name, def);
+        if (isKeyed(def)) {
+            // Keyed module: give it an empty record store. The default in-memory
+            // backend; the StateStore interface is the persistent-KV seam.
+            this.stores.set(def.name, new MemoryStateStore());
+        } else {
+            this.states.set(def.name, def.initialState());
+        }
         // Stamp the module's logic version now; every leaf it later produces
         // records this hash (ADR-0018 pillar 5).
         this.codeHashes.set(def.name, moduleCodeHash(def));
+    }
+
+    /** Register several modules (whole-state and/or keyed) in order. */
+    registerModules(defs: AnyModuleDefinition[]): void {
+        for (const def of defs) this.register(def);
     }
 
     /**
@@ -220,8 +263,7 @@ export class ModuleHost {
             return { status: 404, effects: [], message: `Unknown module: ${cmd.module}` };
         }
 
-        const reducer = def.commands[cmd.command];
-        if (!reducer) {
+        if (!def.commands[cmd.command]) {
             return {
                 status: 404,
                 effects: [],
@@ -229,6 +271,12 @@ export class ModuleHost {
             };
         }
 
+        // Keyed modules take a separate, transactional (StoreView) path.
+        if (isKeyed(def)) {
+            return this.dispatchKeyed(def, cmd, meta);
+        }
+
+        const reducer = def.commands[cmd.command];
         const ctx = createContext(cmd.seed, meta);
         // Hand the reducer a deep clone, never the live reference: a reducer that
         // mutates `state` in place and then throws must not corrupt committed
@@ -279,6 +327,86 @@ export class ModuleHost {
             }
         } catch (err) {
             // A throwing reducer must not corrupt state or halt the host; report it.
+            const message = err instanceof Error ? err.message : String(err);
+            outcome = { status: 500, effects: [], message };
+        }
+
+        this.recordAudit(cmd, meta, outcome.status);
+        return outcome;
+    }
+
+    /**
+     * The KEYED reducer dispatch path (ADR-0018 pillar 4). Mirrors `dispatch`'s
+     * atomicity and resource-bound envelope, but the reducer mutates a
+     * transactional {@link StoreView} instead of returning a next-state blob:
+     *
+     *  - Build a copy-on-write `StoreView` over the module's `StateStore`. The
+     *    reducer reads through it (clones, reads-its-own-writes) and buffers any
+     *    `put`/`delete` — nothing reaches the store yet.
+     *  - On a CLEAN, in-budget return, `commit()` the view atomically. On a thrown
+     *    reducer OR a budget rejection, DISCARD the view (drop it) so the store is
+     *    untouched — the same all-or-nothing guarantee whole-state modules get.
+     *  - Resource bounds (deterministic, computed from the buffer after return):
+     *    `maxEffects` (fan-out), `maxWrites` (records touched), and `maxResultBytes`
+     *    over the canonical bytes of the buffered puts (write amplification). Over
+     *    budget ⇒ 413, view discarded.
+     *  - Audit exactly as the whole-state path (one envelope leaf per run).
+     */
+    private dispatchKeyed(
+        def: KeyedModuleDefinition,
+        cmd: ModuleCommand,
+        meta: { actor: string; requestId: string },
+    ): ModuleApplyResult {
+        const reducer = def.commands[cmd.command];
+        const ctx = createContext(cmd.seed, meta);
+        const store = this.stores.get(cmd.module)!;
+        // The view buffers all writes; the live store is touched only on commit().
+        const view = new StoreView(store);
+
+        let outcome: ModuleApplyResult;
+        try {
+            const result = reducer(view, cmd.input, ctx);
+            const effects = result.effects ?? [];
+
+            if (effects.length > this.maxEffects) {
+                // Over fan-out budget: discard the view (no commit), 413.
+                outcome = {
+                    status: 413,
+                    effects: [],
+                    message:
+                        `Command "${cmd.command}" on module "${cmd.module}" emitted ${effects.length} ` +
+                        `effects, exceeding the limit of ${this.maxEffects}`,
+                };
+            } else if (view.pendingWriteCount() > this.maxWrites) {
+                // Over write-count budget: discard the view, 413.
+                outcome = {
+                    status: 413,
+                    effects: [],
+                    message:
+                        `Command "${cmd.command}" on module "${cmd.module}" buffered ` +
+                        `${view.pendingWriteCount()} writes, exceeding the limit of ${this.maxWrites}`,
+                };
+            } else {
+                const writeBytes = canonicalBytes(view.pendingPuts());
+                if (writeBytes > this.maxResultBytes) {
+                    // Over write-size budget: discard the view, 413.
+                    outcome = {
+                        status: 413,
+                        effects: [],
+                        message:
+                            `Command "${cmd.command}" on module "${cmd.module}" buffered ${writeBytes} bytes ` +
+                            `of writes, exceeding the limit of ${this.maxResultBytes} bytes`,
+                    };
+                } else {
+                    // Clean + in budget: commit the buffer atomically and surface
+                    // the reducer's explicit result value.
+                    view.commit();
+                    outcome = { status: 200, result: result.result, effects };
+                }
+            }
+        } catch (err) {
+            // A throwing keyed reducer commits NOTHING: the view is dropped here
+            // with its buffer unapplied, so the store is exactly as before.
             const message = err instanceof Error ? err.message : String(err);
             outcome = { status: 500, effects: [], message };
         }
@@ -389,12 +517,26 @@ export class ModuleHost {
         if (!q) {
             throw new Error(`Unknown query "${name}" on module "${module}"`);
         }
-        return q(this.states.get(module), args);
+        if (isKeyed(def)) {
+            // A keyed query reads the module's StateStore (reads return clones).
+            return q(this.stores.get(module)!, args);
+        }
+        return (q as (state: unknown, args: unknown) => unknown)(this.states.get(module), args);
     }
 
     /** Current live state of a module (for tests/snapshots). */
     getState(module: string): unknown {
         return this.states.get(module);
+    }
+
+    /**
+     * The `StateStore` backing a keyed module (for tests/inspection). Returns the
+     * LIVE store, not a copy — callers must NOT mutate it in production code
+     * (writes must go through `apply()` so they are audited and replicated);
+     * direct mutation here would diverge a replica.
+     */
+    getStore(module: string): StateStore | undefined {
+        return this.stores.get(module);
     }
 
     /**
@@ -406,6 +548,12 @@ export class ModuleHost {
         const states: Record<string, unknown> = {};
         for (const name of [...this.states.keys()].sort()) {
             states[name] = deepClone(this.states.get(name));
+        }
+        // KEYED modules contribute their store dump (SORTED entries) under the
+        // module name, alongside whole-state blobs. `store.snapshot()` already
+        // returns sorted, cloned entries — deterministic across replicas.
+        for (const name of [...this.stores.keys()].sort()) {
+            states[name] = this.stores.get(name)!.snapshot();
         }
         // The outbox is replicated state too: emit it under a reserved key, also
         // in sorted-key order so `JSON.stringify` over the snapshot is stable.
@@ -428,8 +576,14 @@ export class ModuleHost {
      * absent from the snapshot keep their initialized state.
      */
     restore(snap: Record<string, unknown>): void {
-        for (const name of this.modules.keys()) {
-            if (Object.prototype.hasOwnProperty.call(snap, name)) {
+        for (const [name, def] of this.modules) {
+            if (!Object.prototype.hasOwnProperty.call(snap, name)) continue;
+            if (isKeyed(def)) {
+                // Route by registered kind: a keyed module restores its store from
+                // the dumped [key, value][] entries (cloned by the store on restore).
+                const entries = (snap[name] as [string, unknown][]) ?? [];
+                this.stores.get(name)!.restore(entries);
+            } else {
                 this.states.set(name, deepClone(snap[name]));
             }
         }

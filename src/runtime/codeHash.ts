@@ -1,5 +1,4 @@
 import { createHash } from 'crypto';
-import { ModuleDefinition } from './types';
 
 /**
  * Module code-version hashing (ADR-0018 pillar 5). The audit records a hash of
@@ -29,11 +28,24 @@ function sha256(s: string): string {
 }
 
 /**
+ * The minimal structural shape `moduleCodeHash` needs. Both whole-state
+ * `ModuleDefinition` and `KeyedModuleDefinition` satisfy it (each has a `name`,
+ * an optional `version`, and a `commands` record of functions), so the hash
+ * accepts the heterogeneous registry's union without an `as any` cast at the
+ * call site — it only reads `name`/`version`/the reducers' source text.
+ */
+interface HashableModule {
+    name: string;
+    version?: string;
+    commands: Record<string, (...args: never[]) => unknown>;
+}
+
+/**
  * Deterministic identity hash of a module's logic. Built from the module name,
  * its `version` (defaulting to `'0'` when unset), and each command name paired
  * with its reducer's source text, with command names SORTED for a stable order.
  */
-export function moduleCodeHash(def: ModuleDefinition<any>): string {
+export function moduleCodeHash(def: HashableModule): string {
     const commandNames = Object.keys(def.commands).sort();
     const commandMaterial = commandNames
         // `JSON.stringify` on the name + body keeps the delimiter unambiguous so

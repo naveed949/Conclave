@@ -197,6 +197,18 @@ export interface ModuleHostOptions {
      * Max canonical-JSON byte size of the next-state a reducer may produce. Caps
      * state amplification so a single command cannot bloat replicated state (and
      * thus every snapshot) without bound. Default: 64 KiB.
+     *
+     * For a KEYED module (ADR-0018 pillar 4) this bounds the canonical byte size
+     * of the command's BUFFERED WRITES (the records it `put`s), the keyed analog
+     * of next-state amplification.
      */
     maxResultBytes?: number;
+    /**
+     * Max number of buffered writes (puts + deletes) one KEYED command may make
+     * before commit. Caps how many records a single command can touch, the keyed
+     * analog of `maxEffects` for fan-out. Deterministic (counted from the view's
+     * buffer after the reducer returns), so over-budget commands are rejected
+     * identically on every replica. Default: 256.
+     */
+    maxWrites?: number;
 }
