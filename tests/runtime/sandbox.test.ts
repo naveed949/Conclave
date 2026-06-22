@@ -3,7 +3,8 @@ import { lintReducer } from '../../src/runtime/determinism';
 import { ModuleHost } from '../../src/runtime/moduleHost';
 import { counter } from '../../src/runtime/modules/counter';
 import { compute } from '../../src/runtime/modules/compute';
-import { ModuleCommand, Seed } from '../../src/runtime/types';
+import { compileReducer, runReducer } from '../../src/runtime/sandbox';
+import { ModuleCommand, ReducerContext, Seed } from '../../src/runtime/types';
 
 const META = { actor: 'tester', requestId: 'req-1' };
 
@@ -265,6 +266,43 @@ describe('leader-side step meter: admit()', () => {
         expect(res.status).toBe(200);
         expect(h.query('compute', 'last')).toBe(55); // 1..10
         expect(h.auditSize()).toBe(1);
+    });
+});
+
+describe('coverage instrumentation: injected counter identifiers are tolerated', () => {
+    const ctx: ReducerContext = {
+        now: '2026-06-21T00:00:00.000Z',
+        random: () => 0.5,
+        id: () => 'id-1',
+        actor: 'tester',
+        requestId: 'req-1',
+    };
+
+    // When the suite runs under `jest --coverage`, Istanbul rewrites reducer
+    // bodies to call a per-file counter (`cov_<hash>().f[0]++`). Because the
+    // sandbox compiles from `fn.toString()`, that identifier reaches the vm as a
+    // free global. We simulate that instrumentation explicitly here so the
+    // regression is caught even when coverage is OFF.
+    it('a reducer source that references a cov_<hash> counter still applies', () => {
+        const source = `(state, input, ctx) => {
+            cov_abc123def().f[0]++;
+            cov_abc123def().s[1]++;
+            const next = (cov_abc123def().b[0][0]++, ((state && state.n) || 0) + 1);
+            return { state: { n: next }, result: { n: next } };
+        }`;
+        const compiled = compileReducer(source);
+        const res = runReducer(compiled, { n: 41 }, undefined, ctx);
+        expect((res.state as { n: number }).n).toBe(42);
+        expect((res.result as { n: number }).n).toBe(42);
+    });
+
+    it('still throws for a genuinely banned global (the stub does not widen the sandbox)', () => {
+        const source = `(state, input, ctx) => {
+            cov_abc123def().f[0]++;
+            return { state: { t: Date.now() } };
+        }`;
+        const compiled = compileReducer(source);
+        expect(() => runReducer(compiled, {}, undefined, ctx)).toThrow();
     });
 });
 
