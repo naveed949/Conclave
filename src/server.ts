@@ -35,7 +35,19 @@ const streamGuard = process.env.STREAM_TOKEN_SECRET
     ? buildSignedBookStreamGuard(process.env.STREAM_TOKEN_SECRET)
     : buildBookStreamGuard(process.env.STREAM_TOKENS);
 
-const app = createApp(node, { logger, metrics, streamGuard });
+// Protect the node from slow / abundant edge-stream consumers (M27). Both knobs
+// fall back to safe defaults in the route layer when the env var is unset/invalid.
+const parsePositiveInt = (raw: string | undefined): number | undefined => {
+    if (!raw) return undefined;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+};
+const streamLimits = {
+    maxClients: parsePositiveInt(process.env.STREAM_MAX_CLIENTS),
+    maxBufferBytes: parsePositiveInt(process.env.STREAM_MAX_BUFFER_BYTES),
+};
+
+const app = createApp(node, { logger, metrics, streamGuard, streamLimits });
 const PORT = getPort();
 
 const server = app.listen(PORT, () => {
