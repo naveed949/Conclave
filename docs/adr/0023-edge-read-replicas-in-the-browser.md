@@ -149,10 +149,17 @@ plus the client SDK):
 
 Observability: `raft_stream_subscribers` gauges active edge replicas per node.
 
+- **M26 — signed scoped stream tokens.** Cryptographically-verified, short-lived,
+  scoped tokens replace the guessable static registry: a JWT-shaped HS256 token
+  (`mintStreamToken`/`verifyStreamToken`, Node `crypto` only) carries a `scope`
+  claim and an `exp`, verified by a `createSignedTokenGuard`. The book server wires
+  `buildSignedBookStreamGuard(STREAM_TOKEN_SECRET)` (falling back to the demo
+  registry when unset); mint tokens with `yarn mint-token`. TLS/`wss` and short
+  TTLs remain operationally required (the `?token=` form can leak via URLs).
+
 **Deferred / production hardening** (intentionally out of scope here): backpressure
 and connection caps for slow/abundant consumers (a slow SSE consumer currently
-buffers server-side); JWT/session auth in place of the demo token registry, with
-TLS/`wss` and short-lived tokens (the `?token=` form can leak via URLs); and
-client-side audit-chain verification for end-to-end tamper-evidence (the stream
-sends application state only today, so the chain is not re-derivable on the
-client). See `docs/OPERATIONS.md` → "Edge read replicas in production".
+buffers server-side); and client-side audit-chain verification for end-to-end
+tamper-evidence (the stream sends application state only today, so the chain is not
+re-derivable on the client). See `docs/OPERATIONS.md` → "Edge read replicas in
+production".

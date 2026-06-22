@@ -160,16 +160,23 @@ leaked handles.
 committed log and serve reads locally (see `examples/edge-replica/`). Running it
 in production:
 
-- **Authentication.** The stream is gated by a `StreamGuard`. The book server
-  builds one from `STREAM_TOKENS` (e.g. `STREAM_TOKENS="reader=*,acme=Acme Press"`)
-  — a demo token registry. Replace it with one that verifies a signed JWT (or a
-  session) and derives the scope from its claims; the seam (`createApp({ streamGuard })`)
-  is unchanged. Without a guard the stream is open — only acceptable on a trusted
-  network.
+- **Authentication.** The stream is gated by a `StreamGuard`. Set
+  `STREAM_TOKEN_SECRET` to gate it with **cryptographically-signed, scoped,
+  short-lived tokens** (M26): the book server builds a guard
+  (`buildSignedBookStreamGuard`) that verifies a JWT-shaped HS256 token under that
+  secret and derives the scope from its `scope` claim (`*` for all books, else a
+  publisher). Mint tokens with `STREAM_TOKEN_SECRET=… yarn mint-token "<scope>"
+  [ttlSeconds]` and hand them to clients; keep the secret out of the repo and
+  rotate it. Without `STREAM_TOKEN_SECRET`, the server falls back to the demo
+  `STREAM_TOKENS` registry (e.g. `STREAM_TOKENS="reader=*,acme=Acme Press"`) of
+  *guessable* tokens — fine for the worked example, not for production. The seam
+  (`createApp({ streamGuard })`) is identical either way. Without a guard at all
+  the stream is open — only acceptable on a trusted network.
 - **Token transport.** The Node client sends `Authorization: Bearer <token>`. The
   browser's native `EventSource` cannot set headers, so the token rides the URL
-  (`?token=`), which can leak via logs/referrers — use **short-lived** tokens,
-  serve over **TLS/`wss`**, and prefer a cookie or a token-exchange endpoint.
+  (`?token=`), which can leak via logs/referrers — always serve over **TLS/`wss`**
+  and mint **short-lived** signed tokens (a small `ttlSeconds`), and prefer a
+  cookie or a token-exchange endpoint.
 - **Scaling reads.** Any node serves the stream (reads are local, ADR-0006), so
   point edge clients at **followers** or a dedicated read tier and keep the voting
   set small. `raft_stream_subscribers` (per node) tracks active replicas — alert

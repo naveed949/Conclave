@@ -1,5 +1,6 @@
 import { LogEntry, isControlCommand } from '../consensus/types';
 import { ScopedFilter, StreamGuard } from '../edge/streamGuard';
+import { createSignedTokenGuard } from '../edge/signedToken';
 import { Book, BookCommand } from './book';
 
 /**
@@ -18,6 +19,26 @@ import { Book, BookCommand } from './book';
  * and derives the scope from its claims — the seam is unchanged.
  */
 export type BookScope = { all: true } | { publisher: string };
+
+/**
+ * Map a {@link BookScope} to a fresh {@link ScopedFilter} (one per connection).
+ * Shared by every book guard — the static-registry one and the signed-token one —
+ * so the scope→view-restriction logic lives in exactly one place.
+ */
+export function bookScopeToFilter(scope: BookScope): ScopedFilter<BookCommand> {
+    return new BookScopedFilter(scope);
+}
+
+/**
+ * Read a {@link BookScope} from verified token claims. The `scope` claim is `"*"`
+ * for every book, or a publisher string for that publisher's catalogue only.
+ * Returns `null` (⇒ 401) for a missing or non-string `scope` claim.
+ */
+export function claimsToBookScope(claims: Record<string, unknown>): BookScope | null {
+    const scope = claims['scope'];
+    if (typeof scope !== 'string' || scope.length === 0) return null;
+    return scope === '*' ? { all: true } : { publisher: scope };
+}
 
 /** Scoped, stateful filter over book commands (one per connection). */
 class BookScopedFilter implements ScopedFilter<BookCommand> {
@@ -78,7 +99,7 @@ export class BookStreamGuard implements StreamGuard<BookCommand> {
         if (!token) return null;
         const scope = this.tokens.get(token);
         if (!scope) return null;
-        return new BookScopedFilter(scope);
+        return bookScopeToFilter(scope);
     }
 }
 
@@ -100,4 +121,23 @@ export function buildBookStreamGuard(spec?: string): BookStreamGuard {
         tokens.set(token, value === '*' ? { all: true } : { publisher: value });
     }
     return new BookStreamGuard(tokens);
+}
+
+/**
+ * Build a book {@link StreamGuard} backed by cryptographically-signed, scoped,
+ * short-lived tokens (M26) instead of a guessable static registry. A connection
+ * presents a token minted with `mintStreamToken(secret, { scope }, ttl)`; the
+ * guard verifies the HS256 signature + expiry under `secret` and derives the
+ * scope from the `scope` claim (`"*"` ⇒ all books, else a publisher). Mint tokens
+ * with `scripts/mint-token.js` (`yarn mint-token`). The seam is unchanged — wire
+ * this via `createApp(node, { streamGuard })` exactly like the demo guard.
+ */
+export function buildSignedBookStreamGuard(secret: string): StreamGuard<BookCommand> {
+    return createSignedTokenGuard<BookCommand>({
+        secret,
+        toFilter: (claims) => {
+            const scope = claimsToBookScope(claims);
+            return scope ? bookScopeToFilter(scope) : null;
+        },
+    });
 }

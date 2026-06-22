@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "build:browser": "node scripts/build-browser.js",
+    "mint-token": "node scripts/mint-token.js",
     "start": "tsc && node dist/server.js",
     "test": "jest --detectOpenHandles --runInBand --forceExit"
   },
