@@ -187,8 +187,16 @@ in production:
 - **Compaction outrunning a slow client.** If a client falls behind the snapshot
   boundary, it reconnects and the server re-bootstraps it from a fresh snapshot —
   automatic, but a very slow client re-downloads state.
-- **Known limits (see ADR-0023 → Implementation status).** No SSE backpressure or
-  connection cap yet — a slow consumer buffers server-side; put a reverse proxy
-  with per-connection limits in front, and cap fan-out per node. Client-side
-  audit-chain verification is not yet wired (the stream ships application state
-  only).
+- **Slow / abundant consumers (M27).** The node protects itself two ways. A
+  **per-node connection cap** (`STREAM_MAX_CLIENTS`, default 10000) rejects a new
+  `/raft/stream` connection with **HTTP 503 + `Retry-After`** once the node is at
+  capacity (checked after auth, so a rejected token never consumes a slot). A
+  **backpressure drop** tears a connection down when its server-side send buffer
+  (`res.writableLength`) exceeds `STREAM_MAX_BUFFER_BYTES` (default 1 MiB) — a slow
+  consumer is dropped instead of buffering unboundedly; it reconnects and resumes
+  from its applied index. Watch `raft_stream_rejected_total` and
+  `raft_stream_dropped_total` (per node) alongside the `raft_stream_subscribers`
+  gauge. Still **put a reverse proxy with per-connection limits in front** and cap
+  fan-out per node — the in-process limits are a backstop, not a substitute.
+- **Known limits (see ADR-0023 → Implementation status).** Client-side audit-chain
+  verification is not yet wired (the stream ships application state only).

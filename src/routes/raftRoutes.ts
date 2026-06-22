@@ -5,6 +5,23 @@ import { AppCommand, CommandMeta } from '../consensus/types';
 import { getContext } from '../platform/requestContext';
 import { forwardToLeader, isForwarded } from '../platform/forward';
 import { StreamGuard, ScopedFilter, extractStreamToken } from '../edge/streamGuard';
+import { MetricsRegistry } from '../platform/metrics';
+
+/**
+ * Limits that protect a node from slow or abundant `/raft/stream` consumers
+ * (M27). `maxClients` caps concurrent connections per node; `maxBufferBytes`
+ * caps how many bytes may sit unflushed in one connection's socket send buffer
+ * before we drop it. Both have sensible defaults so omitting them is safe.
+ */
+export interface StreamLimits {
+    /** Max concurrent stream connections on this node. Default 10000. */
+    maxClients?: number;
+    /** Per-connection server-side send-buffer ceiling, in bytes. Default 1 MiB. */
+    maxBufferBytes?: number;
+}
+
+const DEFAULT_MAX_CLIENTS = 10_000;
+const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024; // 1 MiB
 
 /**
  * Internal cluster endpoints: peer RPCs, membership admin, and a status view.
@@ -23,8 +40,16 @@ import { StreamGuard, ScopedFilter, extractStreamToken } from '../edge/streamGua
 export default function raftRoutes<C extends AppCommand, T, SM extends StateMachine<C, T>>(
     node: RaftNode<C, T, SM>,
     streamGuard?: StreamGuard<C>,
+    streamLimits?: StreamLimits,
+    metrics?: MetricsRegistry,
 ) {
     const router = express.Router();
+
+    const maxClients = streamLimits?.maxClients ?? DEFAULT_MAX_CLIENTS;
+    const maxBufferBytes = streamLimits?.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
+    // Active `/raft/stream` connections on this node — the cap is enforced
+    // against this and it's decremented exactly once per connection on cleanup.
+    let activeStreams = 0;
 
     router.post('/request-vote', (req, res) => {
         res.json(node.handleRequestVote(req.body));
@@ -77,6 +102,18 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
             }
         }
 
+        // Per-node connection cap (M27). Check AFTER auth so a rejected token
+        // never consumes a slot. At capacity we fail closed with 503 + Retry-After
+        // and never open the SSE stream; the client backs off and retries (and can
+        // resume from its applied index).
+        if (activeStreams >= maxClients) {
+            metrics?.raftStreamRejected.inc({ node: node.id });
+            res.setHeader('Retry-After', '5');
+            res.status(503).json({ message: 'Stream connection limit reached' });
+            return;
+        }
+        activeStreams += 1;
+
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache, no-transform',
@@ -87,8 +124,39 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
         // Tell an EventSource client how long to wait before reconnecting.
         res.write('retry: 2000\n\n');
 
+        // Cleanup runs exactly once even though it's wired to several triggers
+        // (backpressure drop, `req`/`res` close): clear the keepalive, unsubscribe
+        // from the commit feed, and release the connection slot.
+        let closed = false;
+        let unsubscribe: () => void = () => {};
+        let keepalive: ReturnType<typeof setInterval> | undefined;
+        const close = (): void => {
+            if (closed) return;
+            closed = true;
+            if (keepalive) clearInterval(keepalive);
+            unsubscribe();
+            activeStreams -= 1;
+        };
+
+        // Drop a consumer that can't keep up: if `res.writableLength` (bytes
+        // buffered server-side but not yet handed to the OS) exceeds the ceiling,
+        // the client is too slow — tear the connection down rather than buffer
+        // unboundedly. It can reconnect and resume from its applied index.
+        const dropIfBackpressured = (): boolean => {
+            if (closed) return true;
+            if (res.writableLength > maxBufferBytes) {
+                metrics?.raftStreamDropped.inc({ node: node.id });
+                close();
+                res.destroy();
+                return true;
+            }
+            return false;
+        };
+
         const send = (event: string, data: unknown): void => {
+            if (closed) return;
             res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+            dropIfBackpressured();
         };
 
         // The whole setup below runs synchronously in one tick, so no new commit
@@ -125,19 +193,30 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
         // only the in-scope ones. (SSE rides one ordered TCP connection, so no
         // in-scope entry is dropped mid-stream; on reconnect the client resumes
         // from its applied index and the server replays from there.)
-        const unsubscribe = node.onCommitted((index, entry) => {
-            if (index <= cursor) return;
-            cursor = index;
-            if (!filter || filter.includes(entry)) send('entry', { index, entry });
-        });
+        //
+        // Guard on `!closed`: a backpressure drop during the synchronous catch-up
+        // above already ran `close()` (with `unsubscribe` still the no-op), so
+        // subscribing now would leak a listener into the node's committed feed that
+        // nothing ever removes (and inflate raft_stream_subscribers forever).
+        if (!closed) {
+            unsubscribe = node.onCommitted((index, entry) => {
+                if (closed || index <= cursor) return;
+                cursor = index;
+                if (!filter || filter.includes(entry)) send('entry', { index, entry });
+            });
+        }
 
-        // Keepalive comments stop idle intermediaries from dropping the connection.
-        const keepalive = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+        // If the catch-up replay above already overran the buffer, the connection
+        // is gone — don't arm a keepalive on a dead socket.
+        if (!closed) {
+            // Keepalive comments stop idle intermediaries from dropping the connection.
+            keepalive = setInterval(() => {
+                if (closed) return;
+                res.write(': keepalive\n\n');
+                dropIfBackpressured();
+            }, 15_000);
+        }
 
-        const close = (): void => {
-            clearInterval(keepalive);
-            unsubscribe();
-        };
         req.on('close', close);
         res.on('close', close);
     });

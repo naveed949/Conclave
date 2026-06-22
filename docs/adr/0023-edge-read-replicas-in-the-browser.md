@@ -157,9 +157,14 @@ Observability: `raft_stream_subscribers` gauges active edge replicas per node.
   registry when unset); mint tokens with `yarn mint-token`. TLS/`wss` and short
   TTLs remain operationally required (the `?token=` form can leak via URLs).
 
-**Deferred / production hardening** (intentionally out of scope here): backpressure
-and connection caps for slow/abundant consumers (a slow SSE consumer currently
-buffers server-side); and client-side audit-chain verification for end-to-end
-tamper-evidence (the stream sends application state only today, so the chain is not
-re-derivable on the client). See `docs/OPERATIONS.md` → "Edge read replicas in
-production".
+- **M27 — backpressure + connection caps.** A per-node concurrent-connection cap
+  (`STREAM_MAX_CLIENTS`, 503 + `Retry-After` when full, enforced after auth) and a
+  per-connection send-buffer ceiling (`STREAM_MAX_BUFFER_BYTES`) that drops a slow
+  consumer instead of buffering it server-side; the client reconnects and resumes
+  from its applied index. New counters `raft_stream_rejected_total` /
+  `raft_stream_dropped_total` (per node) observe both.
+
+**Deferred / production hardening** (intentionally out of scope here): client-side
+audit-chain verification for end-to-end tamper-evidence (the stream sends
+application state only today, so the chain is not re-derivable on the client). See
+`docs/OPERATIONS.md` → "Edge read replicas in production".

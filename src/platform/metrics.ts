@@ -117,6 +117,8 @@ export class MetricsRegistry {
     readonly raftDedupCacheSize = new Gauge('raft_dedup_cache_size', 'Remembered requestIds in the idempotency cache (bounded)');
     readonly raftClusterSize = new Gauge('raft_cluster_size', 'Voting members in the current cluster configuration');
     readonly raftStreamSubscribers = new Gauge('raft_stream_subscribers', 'Active committed-log read-stream subscribers (edge replicas) on this node');
+    readonly raftStreamRejected = new Counter('raft_stream_rejected_total', 'Read-stream connections rejected because the node was at its connection cap');
+    readonly raftStreamDropped = new Counter('raft_stream_dropped_total', 'Read-stream connections dropped because the consumer could not keep up (backpressure)');
     readonly stateMachineEntries = new Gauge('state_machine_entries', 'Entries currently in the application state machine');
 
     // --- Module runtime observability (Milestone 15, ADR-0019). These mirror the
@@ -141,7 +143,7 @@ export class MetricsRegistry {
         this.httpRequests, this.httpDuration, this.raftElections, this.raftReadBarriers, this.raftFollowerReads, this.raftTerm,
         this.raftIsLeader, this.raftCommitIndex, this.raftLastApplied, this.raftLogLength,
         this.raftSnapshotIndex, this.raftReplicationLag, this.raftDedupCacheSize, this.raftClusterSize,
-        this.raftStreamSubscribers, this.stateMachineEntries,
+        this.raftStreamSubscribers, this.raftStreamRejected, this.raftStreamDropped, this.stateMachineEntries,
         this.moduleCommands, this.moduleCommandDuration, this.moduleOutboxPending, this.moduleOutboxDone,
         this.moduleAuditSize, this.moduleRegistered, this.effectRuns, this.shardHasLeader, this.shardCount,
     ];
