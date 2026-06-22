@@ -97,6 +97,9 @@ export {
     mintStreamToken,
     verifyStreamToken,
     createSignedTokenGuard,
+    webcryptoSha256Hex,
+    GENESIS_HASH,
+    auditEntryPayload,
 } from './edge';
 export type {
     EdgeReplicaOptions,
@@ -109,4 +112,5 @@ export type {
     MessageEventLike,
     StreamGuard,
     ScopedFilter,
+    Sha256Hex,
 } from './edge';

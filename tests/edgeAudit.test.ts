@@ -1,5 +1,6 @@
 import http from 'http';
 import { Server } from 'http';
+import { createHash } from 'crypto';
 import { AddressInfo } from 'net';
 import { createApp } from '../src/app';
 import { RaftNode } from '../src/consensus/raftNode';
@@ -10,6 +11,7 @@ import { BookStateMachine } from '../src/models/bookStateMachine';
 import { buildBookStreamGuard } from '../src/models/bookStreamGuard';
 import { EdgeReplica } from '../src/edge/edgeReplica';
 import { HttpStreamSource } from '../src/edge/httpStreamSource';
+import { LogStreamSource } from '../src/edge/types';
 import { waitFor } from './helpers';
 
 jest.setTimeout(30000);
@@ -78,14 +80,17 @@ describe('EdgeReplica audit verification (ADR-0023, M28)', () => {
             );
 
             // The replica re-derived a valid, complete chain.
-            const result = replica.verifyAudit();
+            const result = await replica.verifyAudit();
             expect(result).not.toBeNull();
             expect(result!.valid).toBe(true);
             expect(result!.length).toBe(node.stateMachine.getAuditLog().length);
 
-            // And it is the SAME chain the server holds (heads match).
-            expect(replica.auditHead()).not.toBeNull();
-            expect(replica.auditHead()).toBe(serverAuditHead(node));
+            // And it is the SAME chain the server holds (heads match) — proving the
+            // async WebCrypto re-derivation matches the server's Node-crypto chain
+            // byte-for-byte.
+            const head = await replica.auditHead();
+            expect(head).not.toBeNull();
+            expect(head).toBe(serverAuditHead(node));
             expect(node.stateMachine.verifyAudit().valid).toBe(true);
         });
 
@@ -101,7 +106,7 @@ describe('EdgeReplica audit verification (ADR-0023, M28)', () => {
             replica.start();
             await waitFor(() => replica!.isCaughtUp() && local.size() === 1, 5000);
 
-            const headBefore = replica.auditHead();
+            const headBefore = await replica.auditHead();
             expect(headBefore).toBe(serverAuditHead(node));
 
             // Submit more after catch-up; the live tail extends the chain.
@@ -109,10 +114,11 @@ describe('EdgeReplica audit verification (ADR-0023, M28)', () => {
             await node.submit(book('isbn-2'));
             await waitFor(() => local.size() === 3, 5000);
 
-            const after = replica.verifyAudit();
+            const after = await replica.verifyAudit();
             expect(after!.valid).toBe(true);
-            expect(replica.auditHead()).not.toBe(headBefore); // head advanced
-            expect(replica.auditHead()).toBe(serverAuditHead(node));
+            const headAfter = await replica.auditHead();
+            expect(headAfter).not.toBe(headBefore); // head advanced
+            expect(headAfter).toBe(serverAuditHead(node));
         });
     });
 
@@ -153,6 +159,106 @@ describe('EdgeReplica audit verification (ADR-0023, M28)', () => {
         expect(result.valid).toBe(false);
         expect(result.brokenAt).toBe(victim.index);
 
+        node.stop();
+    });
+
+    /**
+     * The same tamper-evidence, but exercised through the EDGE replica's async
+     * WebCrypto `verifyAudit()`. A fake stream source delivers a tampered full
+     * snapshot directly (cleaner than injecting a malicious server mid-SSE). The
+     * client re-derives the chain with WebCrypto and must flag the broken entry.
+     */
+    it('edge verifyAudit (async/WebCrypto) detects a tampered snapshot prefix', async () => {
+        const node = new RaftNode<BookCommand, Book, BookStateMachine>(
+            { id: 'solo', peers: [], stateMachine: new BookStateMachine(), ...TIMERS },
+            new LocalTransport(new Map()),
+        );
+        node.start();
+        await waitFor(() => node.isLeader(), 3000);
+        for (let i = 0; i < 3; i++) await node.submit(book(`isbn-${i}`));
+
+        const snap = node.stateMachine.snapshot();
+        expect(snap.audit.length).toBeGreaterThan(1);
+        const victim = snap.audit[1];
+        const tampered = {
+            ...snap,
+            audit: snap.audit.map((e, i) =>
+                i === 1 ? { ...e, actor: `${victim.actor}-tampered` } : { ...e },
+            ),
+        };
+
+        // A fake source that just hands the replica the tampered snapshot, then
+        // reports caught-up — no real network.
+        const fakeSource: LogStreamSource<BookCommand> = {
+            connect(_from, handlers) {
+                handlers.onOpen?.();
+                handlers.onSnapshot({ lastIncludedIndex: 3, lastIncludedTerm: 1, members: [], data: tampered });
+                handlers.onCaughtUp(3);
+                return () => {};
+            },
+        };
+
+        const replica = new EdgeReplica<BookCommand, Book>({
+            app: new BookStateMachine(),
+            source: fakeSource,
+            verifyAudit: true,
+        });
+        replica.start();
+        await waitFor(() => replica.isCaughtUp(), 5000);
+
+        const result = await replica.verifyAudit();
+        expect(result).not.toBeNull();
+        expect(result!.valid).toBe(false);
+        expect(result!.brokenAt).toBe(victim.index);
+
+        replica.stop();
+        node.stop();
+    });
+
+    /**
+     * The injectable hasher seam: an UNTAMPERED full snapshot fed through a custom
+     * `auditHasher` re-derives a valid chain whose head equals the server's. This
+     * also pins that the default WebCrypto hasher and an explicit one agree (both
+     * are SHA-256 hex).
+     */
+    it('verifies a valid snapshot via an injected SHA-256 hasher and matches the head', async () => {
+        const node = new RaftNode<BookCommand, Book, BookStateMachine>(
+            { id: 'solo', peers: [], stateMachine: new BookStateMachine(), ...TIMERS },
+            new LocalTransport(new Map()),
+        );
+        node.start();
+        await waitFor(() => node.isLeader(), 3000);
+        for (let i = 0; i < 3; i++) await node.submit(book(`isbn-${i}`));
+
+        const snap = node.stateMachine.snapshot();
+        const fakeSource: LogStreamSource<BookCommand> = {
+            connect(_from, handlers) {
+                handlers.onOpen?.();
+                handlers.onSnapshot({ lastIncludedIndex: 3, lastIncludedTerm: 1, members: [], data: snap });
+                handlers.onCaughtUp(3);
+                return () => {};
+            },
+        };
+
+        // Inject Node's crypto via a Promise-wrapped sha256 to prove the seam works
+        // and yields the same chain the WebCrypto default would.
+        const nodeHasher = async (input: string): Promise<string> =>
+            createHash('sha256').update(input).digest('hex');
+
+        const replica = new EdgeReplica<BookCommand, Book>({
+            app: new BookStateMachine(),
+            source: fakeSource,
+            verifyAudit: true,
+            auditHasher: nodeHasher,
+        });
+        replica.start();
+        await waitFor(() => replica.isCaughtUp(), 5000);
+
+        const result = await replica.verifyAudit();
+        expect(result!.valid).toBe(true);
+        expect(await replica.auditHead()).toBe(serverAuditHead(node));
+
+        replica.stop();
         node.stop();
     });
 
@@ -201,8 +307,8 @@ describe('EdgeReplica audit verification (ADR-0023, M28)', () => {
             expect(local.getAll().map((b) => b.isbn).sort()).toEqual(['a1', 'a2']);
 
             // But verification is correctly UNAVAILABLE — not a false "valid".
-            expect(replica.verifyAudit()).toBeNull();
-            expect(replica.auditHead()).toBeNull();
+            expect(await replica.verifyAudit()).toBeNull();
+            expect(await replica.auditHead()).toBeNull();
             expect(replica.getAuditLog()).toBeNull();
         });
     });
@@ -239,8 +345,8 @@ describe('EdgeReplica audit verification (ADR-0023, M28)', () => {
             replica.start();
             await waitFor(() => replica!.isCaughtUp() && local.size() === 1, 5000);
 
-            expect(replica.verifyAudit()).toBeNull();
-            expect(replica.auditHead()).toBeNull();
+            expect(await replica.verifyAudit()).toBeNull();
+            expect(await replica.auditHead()).toBeNull();
             expect(replica.getAuditLog()).toBeNull();
         });
     });

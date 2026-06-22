@@ -1,6 +1,8 @@
-import { ReplicatedStateMachine, RsmSnapshot } from '../consensus/replicatedStateMachine';
+import { auditEntryPayload, AuditRecord, GENESIS_HASH } from '../consensus/auditChain';
+import type { RsmSnapshot } from '../consensus/replicatedStateMachine';
 import { StateMachine } from '../consensus/stateMachine';
 import { AppCommand, AuditEntry, isControlCommand, LogEntry } from '../consensus/types';
+import { Sha256Hex, webcryptoSha256Hex } from './sha256';
 import { LogStreamSource, StreamEntry, StreamSnapshot } from './types';
 
 export interface EdgeReplicaOptions<C extends AppCommand, T> {
@@ -20,19 +22,30 @@ export interface EdgeReplicaOptions<C extends AppCommand, T> {
     /** Optional structured log sink. */
     logger?: (msg: string, meta?: Record<string, unknown>) => void;
     /**
-     * Opt in to **client-side audit-chain verification** (M28, ADR-0023). When set,
-     * the replica applies committed entries through a {@link ReplicatedStateMachine}
-     * (wrapping `app`), re-deriving the tamper-evident SHA-256 audit hash-chain the
-     * server maintains — so it can prove the served history is internally consistent
-     * via {@link EdgeReplica.verifyAudit}.
+     * Opt in to **client-side audit-chain verification** (M28/M29, ADR-0023). When
+     * set, the replica re-derives the tamper-evident SHA-256 audit hash-chain the
+     * server maintains as it applies committed entries — so it can prove the served
+     * history is internally consistent via {@link EdgeReplica.verifyAudit}.
+     *
+     * The chain is recomputed with **async WebCrypto** (`globalThis.crypto.subtle`),
+     * which exists in BOTH the browser and Node 20+, so verification works in either
+     * environment with no Node `crypto` and no extra dependency. The hash *payload
+     * format* is shared with the server ({@link auditEntryPayload}) so the chains
+     * cannot drift. Because WebCrypto is async, {@link EdgeReplica.verifyAudit} and
+     * {@link EdgeReplica.auditHead} return promises.
      *
      * Requires the FULL (unfiltered) stream: the bootstrap snapshot must carry the
      * audit data. On a SCOPED stream the audit is stripped (the uniform-log-vs-authz
      * tension), so verification becomes **unavailable** — {@link EdgeReplica.verifyAudit}
-     * returns `null` rather than falsely reporting success. Node-only: the chain uses
-     * Node `crypto` (sync); browser verification needs async WebCrypto (future work).
+     * resolves `null` rather than falsely reporting success.
      */
     verifyAudit?: boolean;
+    /**
+     * The SHA-256 hex hasher used to re-derive the audit chain. Defaults to
+     * {@link webcryptoSha256Hex} (WebCrypto; browser + Node 20+). Injectable for
+     * tests or a custom crypto provider. Only used when `verifyAudit` is set.
+     */
+    auditHasher?: Sha256Hex;
 }
 
 /**
@@ -69,42 +82,69 @@ class DirectApplier<C extends AppCommand, T> implements Applier<C, T> {
 }
 
 /**
- * Audit-verifying applier: wraps the same `app` in a {@link ReplicatedStateMachine}
- * so applying re-derives the audit hash-chain. Reads still come from `app` (the
- * RSM delegates `apply` to it), so `replica.app` stays correct.
+ * Browser-safe audit-verifying applier (M29). Applies commands to the bare `app`
+ * (exactly like {@link DirectApplier}, so reads via `replica.app` stay correct)
+ * AND records an audit INPUT per non-NOOP entry — the same `{ index, term, type,
+ * actor, requestId, timestamp, status }` the server's `ReplicatedStateMachine`
+ * audits. It does NOT hash on the apply path (WebCrypto is async); hashing happens
+ * lazily in {@link EdgeReplica.verifyAudit}/{@link EdgeReplica.auditHead}.
+ *
+ * This deliberately pulls in NO Node `crypto` (only `import type` of `RsmSnapshot`
+ * for the restore shape), so it is safe in the browser bundle.
  *
  * `available` is false when bootstrapped from a snapshot WITHOUT audit data (a
  * scoped/partial stream): the chain cannot be rebuilt, so verification is reported
  * unavailable rather than silently "valid".
  */
 class AuditingApplier<C extends AppCommand, T> implements Applier<C, T> {
-    readonly rsm: ReplicatedStateMachine<C, T>;
     available = true;
+    /** Server-supplied, already-hashed audit prefix from a full-stream snapshot. */
+    auditPrefix: AuditEntry[] = [];
+    /** Head of the server prefix (its `lastHash`) — the seed for live records. */
+    prefixHead: string = GENESIS_HASH;
+    /** Live records collected from the tail (no server hash; we re-derive theirs). */
+    liveRecords: AuditRecord[] = [];
 
-    constructor(app: StateMachine<C, T>) {
-        this.rsm = new ReplicatedStateMachine<C, T>(app);
-    }
+    constructor(private readonly app: StateMachine<C, T>) {}
 
     restore(data: unknown): void {
         const obj = data as Partial<RsmSnapshot<T>> | undefined;
         // A full-stream snapshot carries `audit` + `lastHash`; a scoped one is just
         // `{ state }`. Without the audit we cannot rebuild/verify the chain.
-        if (obj && typeof obj === 'object' && 'audit' in obj && 'lastHash' in obj) {
-            this.rsm.restore(obj as RsmSnapshot<T>);
+        if (obj && typeof obj === 'object' && 'audit' in obj && 'lastHash' in obj && Array.isArray(obj.audit)) {
+            this.app.restore(obj.state);
+            this.auditPrefix = (obj.audit as AuditEntry[]).map((e) => ({ ...e }));
+            this.prefixHead = obj.lastHash as string;
+            this.liveRecords = [];
             this.available = true;
         } else {
             // Restore application state only (so reads still work) and mark
             // verification unavailable.
             const state = obj && typeof obj === 'object' && 'state' in obj ? obj.state : data;
-            this.rsm.application.restore(state);
+            this.app.restore(state);
             this.available = false;
         }
     }
 
     applyEntry(index: number, entry: LogEntry<C>): void {
-        // `apply` chains the audit hash for non-NOOP entries and delegates the
-        // application effect to the wrapped SM — exactly what the server does.
-        this.rsm.apply(index, entry);
+        const { command, meta } = entry;
+        // NOOP entries are internal Raft bookkeeping — never audited (mirrors the
+        // server's `ReplicatedStateMachine.apply`).
+        if (command.type === 'NOOP') return;
+
+        // Control commands (CONFIG) have no application effect but ARE audited with
+        // status 200; everything else is an application command applied to `app`.
+        const status = isControlCommand(command) ? 200 : this.app.apply(command as C).status;
+
+        this.liveRecords.push({
+            index,
+            term: entry.term,
+            type: command.type,
+            actor: meta?.actor ?? 'system',
+            requestId: meta?.requestId ?? '',
+            timestamp: meta?.timestamp ?? '',
+            status,
+        });
     }
 }
 
@@ -130,6 +170,7 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
 
     private readonly applier: Applier<C, T>;
     private readonly auditing: AuditingApplier<C, T> | null;
+    private readonly auditHasher: Sha256Hex;
     private readonly source: LogStreamSource<C>;
     private readonly reconnectMinMs: number;
     private readonly reconnectMaxMs: number;
@@ -159,6 +200,7 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
             this.auditing = null;
             this.applier = new DirectApplier<C, T>(opts.app);
         }
+        this.auditHasher = opts.auditHasher ?? webcryptoSha256Hex;
         this.source = opts.source;
         this.appliedIndex = opts.fromIndex ?? 0;
         this.reconnectMinMs = opts.reconnectMinMs ?? 250;
@@ -231,32 +273,76 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
     /**
      * Recompute the audit hash-chain over the history this replica rebuilt and
      * report whether it is intact — end-to-end tamper-evidence for the served log.
+     * Async because it hashes with WebCrypto (so it runs in the browser too).
      *
-     * Returns `null` when verification is **unavailable**: either the replica is not
+     * The server-supplied snapshot `audit` prefix is the tamper-checked part: each
+     * entry's stored `hash`/`prevHash` is re-derived and compared (a mismatch yields
+     * `{ valid: false, brokenAt }`). Live tail records carry no server hash — they
+     * extend the chain (matching M28's behavior). `length` counts prefix + live.
+     *
+     * Resolves `null` when verification is **unavailable**: either the replica is not
      * in auditing mode (`verifyAudit` was not set), or it bootstrapped from a SCOPED
      * snapshot that carried no audit data (the uniform-log-vs-authz tension). A
      * scoped client therefore gets `null`, never a false `{ valid: true }`.
      */
-    verifyAudit(): { valid: boolean; brokenAt?: number; length: number } | null {
+    async verifyAudit(): Promise<{ valid: boolean; brokenAt?: number; length: number } | null> {
         if (!this.auditing || !this.auditing.available) return null;
-        return this.auditing.rsm.verifyAudit();
+        const { auditPrefix, liveRecords } = this.auditing;
+        const length = auditPrefix.length + liveRecords.length;
+
+        let prev = GENESIS_HASH;
+        for (const e of auditPrefix) {
+            const expected = await this.auditHasher(auditEntryPayload({ ...e, prevHash: prev }));
+            if (e.prevHash !== prev || e.hash !== expected) {
+                return { valid: false, brokenAt: e.index, length };
+            }
+            prev = e.hash;
+        }
+        // Fold the live records (they extend the verified prefix; no stored hash to
+        // compare against — they advance the running head).
+        for (const r of liveRecords) {
+            prev = await this.auditHasher(auditEntryPayload({ ...r, prevHash: prev }));
+        }
+        return { valid: true, length };
     }
 
     /**
-     * The current head of the rebuilt audit hash-chain (the last entry's hash), or
-     * `null` if verification is unavailable. Equals the server's audit head once the
-     * replica has caught up — proving it re-derived the SAME chain the node holds.
+     * The current head of the rebuilt audit hash-chain (the running hash after the
+     * server prefix + live tail), or `null` if verification is unavailable. Async
+     * (WebCrypto). Equals the server's audit head once caught up — proving it
+     * re-derived the SAME chain the node holds.
      */
-    auditHead(): string | null {
+    async auditHead(): Promise<string | null> {
         if (!this.auditing || !this.auditing.available) return null;
-        const log = this.auditing.rsm.getAuditLog();
-        return log.length > 0 ? log[log.length - 1].hash : null;
+        const { auditPrefix, liveRecords } = this.auditing;
+        // The prefix is already hashed by the server; its head is `prefixHead`.
+        let prev = auditPrefix.length > 0 ? this.auditing.prefixHead : GENESIS_HASH;
+        if (liveRecords.length === 0) {
+            // No live records: the head is the prefix head, or GENESIS_HASH for an
+            // empty-but-available chain (so "available ⇒ non-null head" always holds,
+            // consistent with verifyAudit() returning { valid: true } for it).
+            return prev;
+        }
+        for (const r of liveRecords) {
+            prev = await this.auditHasher(auditEntryPayload({ ...r, prevHash: prev }));
+        }
+        return prev;
     }
 
-    /** The rebuilt audit entries, or `null` if verification is unavailable. */
+    /**
+     * The rebuilt audit entries (server prefix as full {@link AuditEntry}s plus the
+     * live tail's audit inputs, which lack a derived `hash`), or `null` if
+     * verification is unavailable. Sync — returns the collected records as-is.
+     */
     getAuditLog(): AuditEntry[] | null {
         if (!this.auditing || !this.auditing.available) return null;
-        return this.auditing.rsm.getAuditLog();
+        const prefix = this.auditing.auditPrefix.map((e) => ({ ...e }));
+        const live: AuditEntry[] = this.auditing.liveRecords.map((r) => ({
+            ...r,
+            prevHash: '',
+            hash: '',
+        }));
+        return [...prefix, ...live];
     }
 
     // ---- connection lifecycle ----
