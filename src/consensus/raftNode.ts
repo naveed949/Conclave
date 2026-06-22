@@ -1356,6 +1356,7 @@ export class RaftNode<
         m.raftSnapshotIndex.set(this.lastIncludedIndex, { node });
         m.raftDedupCacheSize.set(this.rsm.dedupCacheSize(), { node });
         m.raftClusterSize.set(this.members.size, { node });
+        m.raftStreamSubscribers.set(this.committedListeners.size, { node });
         m.stateMachineEntries.set(this.rsm.size(), { node });
         // Rebuild the per-peer lag series each scrape so a removed peer (or one we
         // no longer lead) doesn't leave a stale gauge behind forever.

@@ -1,7 +1,7 @@
 # 0023. Edge read replicas in the browser
 
-- Status: Proposed
-- Date: 2026-06-22
+- Status: Accepted
+- Date: 2026-06-22 (accepted and implemented — see Implementation status)
 
 ## Context
 
@@ -124,3 +124,35 @@ Negative / risks:
   (partial replication, per-client authz) we would otherwise reinvent.
 - **Do nothing** — reads stay server-side. No new attack surface or operational
   burden; loses the local-first latency/offline/reactivity upside. The status quo.
+
+## Implementation status
+
+Built across milestones M20–M24 (the three prerequisites, in the order above,
+plus the client SDK):
+
+- **M20 — committed-log read stream.** A non-voting, read-only tap on the
+  committed log on `RaftNode` (`onCommitted` / `getCommittedEntries` /
+  `getStreamSnapshot`) and a resumable SSE endpoint `GET /raft/stream` served by
+  **any** node (snapshot handoff → committed tail → live tail).
+- **M21 — edge replica SDK** (`src/edge/`). `EdgeReplica` bootstraps, applies
+  committed commands to a local `StateMachine`, serves local reads, and provides
+  read-your-writes (`waitForIndex`) and a change-feed, over a `LogStreamSource`
+  seam (Node `HttpStreamSource`, browser `EventSourceStreamSource`).
+- **M23 — per-client authorization + partial replication** (`StreamGuard` /
+  `ScopedFilter`). A connection presents a token (bearer header or `?token=`);
+  the snapshot and entry feed are restricted to its scope. The book example
+  scopes by publisher. This closes the "make-or-break" gap above.
+- **M24 — compiled browser SDK.** The browser imports the *same* compiled
+  `StateMachine` the server runs (`yarn build:browser`), resolving the
+  determinism-across-builds hazard. Worked browser + Node demos in
+  `examples/edge-replica/`.
+
+Observability: `raft_stream_subscribers` gauges active edge replicas per node.
+
+**Deferred / production hardening** (intentionally out of scope here): backpressure
+and connection caps for slow/abundant consumers (a slow SSE consumer currently
+buffers server-side); JWT/session auth in place of the demo token registry, with
+TLS/`wss` and short-lived tokens (the `?token=` form can leak via URLs); and
+client-side audit-chain verification for end-to-end tamper-evidence (the stream
+sends application state only today, so the chain is not re-derivable on the
+client). See `docs/OPERATIONS.md` → "Edge read replicas in production".
