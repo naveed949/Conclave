@@ -164,7 +164,27 @@ Observability: `raft_stream_subscribers` gauges active edge replicas per node.
   from its applied index. New counters `raft_stream_rejected_total` /
   `raft_stream_dropped_total` (per node) observe both.
 
-**Deferred / production hardening** (intentionally out of scope here): client-side
-audit-chain verification for end-to-end tamper-evidence (the stream sends
-application state only today, so the chain is not re-derivable on the client). See
-`docs/OPERATIONS.md` → "Edge read replicas in production".
+- **M28 — client-side audit verification (FULL streams, Node).** An opt-in
+  `new EdgeReplica({ app, source, verifyAudit: true })` applies the committed-log
+  stream through a `ReplicatedStateMachine`, re-deriving the same SHA-256 audit
+  hash-chain the server maintains. `verifyAudit()` recomputes the chain and reports
+  `{ valid, brokenAt?, length }`; `auditHead()`/`getAuditLog()` expose the rebuilt
+  chain. A caught-up replica's `auditHead()` equals the node's server-side head,
+  delivering the ADR's **end-to-end tamper-evidence** pro: a forged history fails to
+  verify on the client. Two boundaries are deliberate:
+  - **Unavailable on scoped/partial streams.** A `StreamGuard` strips audit/dedup
+    from the (scoped) bootstrap snapshot — the uniform-log-vs-authz tension — so the
+    client cannot re-derive the chain. The server sends the scoped client an
+    audit-stripped bootstrap snapshot as an explicit marker, and `verifyAudit()`
+    returns `null` (verification *unavailable*) rather than a false `{ valid: true }`.
+  - **Browser remains future work.** The chain uses Node `crypto` (synchronous);
+    a browser must re-derive it with async WebCrypto. The verifying applier is
+    therefore Node-only for now; `EventSourceStreamSource` clients still read and
+    converge, they just cannot yet verify.
+
+**Deferred / production hardening** (intentionally out of scope here): browser-side
+audit-chain verification (needs async WebCrypto — the chain currently uses Node
+`crypto`, sync) and verification on scoped/partial streams (the audit is stripped
+from a scoped snapshot, so the chain is not re-derivable there). Node-side
+verification on full streams is implemented (M28 above). See `docs/OPERATIONS.md`
+→ "Edge read replicas in production".

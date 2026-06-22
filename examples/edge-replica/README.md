@@ -85,3 +85,33 @@ curl -s -XPOST http://localhost:3001/books -H 'Content-Type: application/json' \
 Reads are eventually consistent by default. After a write commits at index *i*
 (the leader returns it), `await replica.waitForIndex(i)` before reading the
 affected view so the user sees their own change — see `EdgeReplica.waitForIndex`.
+
+## Audit verification (M28, Node, full streams)
+
+On an **unfiltered** (no-`StreamGuard`) stream the bootstrap snapshot carries the
+audit data, so a Node replica can re-derive the tamper-evident hash-chain the
+server maintains and verify it end to end. Opt in with `verifyAudit: true`:
+
+```js
+const replica = new EdgeReplica({
+    app: new BookStateMachine(),
+    source: new HttpStreamSource('http://localhost:3001'),
+    verifyAudit: true, // rebuild + verify the audit chain as we apply
+});
+replica.start();
+await replica.waitForIndex(i); // catch up
+
+const result = replica.verifyAudit(); // { valid, brokenAt?, length } — or null
+console.log(result.valid, replica.auditHead()); // head equals the node's audit head
+```
+
+`auditHead()` of a caught-up replica equals the node's server-side audit head,
+proving the client re-derived the *same* chain — a forged history would fail to
+verify. Two caveats:
+
+- **Scoped streams can't verify.** With a `StreamGuard` the scoped snapshot strips
+  the audit (authz vs. a uniform log), so `verifyAudit()`/`auditHead()` return
+  `null` — verification is *unavailable*, never a false "valid".
+- **Browser is future work.** The chain uses Node `crypto` (sync); a browser needs
+  async WebCrypto. The browser SDK still reads and converges — it just can't yet
+  verify.

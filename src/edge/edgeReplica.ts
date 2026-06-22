@@ -1,5 +1,6 @@
+import { ReplicatedStateMachine, RsmSnapshot } from '../consensus/replicatedStateMachine';
 import { StateMachine } from '../consensus/stateMachine';
-import { AppCommand, isControlCommand } from '../consensus/types';
+import { AppCommand, AuditEntry, isControlCommand, LogEntry } from '../consensus/types';
 import { LogStreamSource, StreamEntry, StreamSnapshot } from './types';
 
 export interface EdgeReplicaOptions<C extends AppCommand, T> {
@@ -18,6 +19,93 @@ export interface EdgeReplicaOptions<C extends AppCommand, T> {
     reconnectMaxMs?: number;
     /** Optional structured log sink. */
     logger?: (msg: string, meta?: Record<string, unknown>) => void;
+    /**
+     * Opt in to **client-side audit-chain verification** (M28, ADR-0023). When set,
+     * the replica applies committed entries through a {@link ReplicatedStateMachine}
+     * (wrapping `app`), re-deriving the tamper-evident SHA-256 audit hash-chain the
+     * server maintains — so it can prove the served history is internally consistent
+     * via {@link EdgeReplica.verifyAudit}.
+     *
+     * Requires the FULL (unfiltered) stream: the bootstrap snapshot must carry the
+     * audit data. On a SCOPED stream the audit is stripped (the uniform-log-vs-authz
+     * tension), so verification becomes **unavailable** — {@link EdgeReplica.verifyAudit}
+     * returns `null` rather than falsely reporting success. Node-only: the chain uses
+     * Node `crypto` (sync); browser verification needs async WebCrypto (future work).
+     */
+    verifyAudit?: boolean;
+}
+
+/**
+ * Internal seam isolating HOW committed entries land in local state, so the
+ * audit-verifying mode is a clean swap of strategy rather than conditionals
+ * scattered through the stream-handling code.
+ */
+interface Applier<C extends AppCommand, T> {
+    /** Restore from a bootstrap snapshot payload (the `data` of a `snapshot` event). */
+    restore(data: unknown): void;
+    /** Apply one committed entry at its absolute index. */
+    applyEntry(index: number, entry: LogEntry<C>): void;
+}
+
+/** Default applier: today's behavior — apply commands to the bare application SM. */
+class DirectApplier<C extends AppCommand, T> implements Applier<C, T> {
+    constructor(private readonly app: StateMachine<C, T>) {}
+
+    restore(data: unknown): void {
+        // The stream carries the replicated-state-machine snapshot; an edge replica
+        // only needs the application state slice to restore its local view.
+        const obj = data as { state?: unknown } | undefined;
+        const state = obj && typeof obj === 'object' && 'state' in obj ? obj.state : data;
+        this.app.restore(state);
+    }
+
+    applyEntry(_index: number, entry: LogEntry<C>): void {
+        // Control commands (NOOP/CONFIG) have no application effect — advance past
+        // them just like the server's replicated state machine does.
+        if (!isControlCommand(entry.command)) {
+            this.app.apply(entry.command as C);
+        }
+    }
+}
+
+/**
+ * Audit-verifying applier: wraps the same `app` in a {@link ReplicatedStateMachine}
+ * so applying re-derives the audit hash-chain. Reads still come from `app` (the
+ * RSM delegates `apply` to it), so `replica.app` stays correct.
+ *
+ * `available` is false when bootstrapped from a snapshot WITHOUT audit data (a
+ * scoped/partial stream): the chain cannot be rebuilt, so verification is reported
+ * unavailable rather than silently "valid".
+ */
+class AuditingApplier<C extends AppCommand, T> implements Applier<C, T> {
+    readonly rsm: ReplicatedStateMachine<C, T>;
+    available = true;
+
+    constructor(app: StateMachine<C, T>) {
+        this.rsm = new ReplicatedStateMachine<C, T>(app);
+    }
+
+    restore(data: unknown): void {
+        const obj = data as Partial<RsmSnapshot<T>> | undefined;
+        // A full-stream snapshot carries `audit` + `lastHash`; a scoped one is just
+        // `{ state }`. Without the audit we cannot rebuild/verify the chain.
+        if (obj && typeof obj === 'object' && 'audit' in obj && 'lastHash' in obj) {
+            this.rsm.restore(obj as RsmSnapshot<T>);
+            this.available = true;
+        } else {
+            // Restore application state only (so reads still work) and mark
+            // verification unavailable.
+            const state = obj && typeof obj === 'object' && 'state' in obj ? obj.state : data;
+            this.rsm.application.restore(state);
+            this.available = false;
+        }
+    }
+
+    applyEntry(index: number, entry: LogEntry<C>): void {
+        // `apply` chains the audit hash for non-NOOP entries and delegates the
+        // application effect to the wrapped SM — exactly what the server does.
+        this.rsm.apply(index, entry);
+    }
 }
 
 /**
@@ -40,6 +128,8 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
     /** The local application state machine — read from it directly (e.g. `app.getAll()`). */
     readonly app: StateMachine<C, T>;
 
+    private readonly applier: Applier<C, T>;
+    private readonly auditing: AuditingApplier<C, T> | null;
     private readonly source: LogStreamSource<C>;
     private readonly reconnectMinMs: number;
     private readonly reconnectMaxMs: number;
@@ -62,6 +152,13 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
 
     constructor(opts: EdgeReplicaOptions<C, T>) {
         this.app = opts.app;
+        if (opts.verifyAudit) {
+            this.auditing = new AuditingApplier<C, T>(opts.app);
+            this.applier = this.auditing;
+        } else {
+            this.auditing = null;
+            this.applier = new DirectApplier<C, T>(opts.app);
+        }
         this.source = opts.source;
         this.appliedIndex = opts.fromIndex ?? 0;
         this.reconnectMinMs = opts.reconnectMinMs ?? 250;
@@ -129,6 +226,39 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
         });
     }
 
+    // ---- audit verification (M28, ADR-0023) ----
+
+    /**
+     * Recompute the audit hash-chain over the history this replica rebuilt and
+     * report whether it is intact — end-to-end tamper-evidence for the served log.
+     *
+     * Returns `null` when verification is **unavailable**: either the replica is not
+     * in auditing mode (`verifyAudit` was not set), or it bootstrapped from a SCOPED
+     * snapshot that carried no audit data (the uniform-log-vs-authz tension). A
+     * scoped client therefore gets `null`, never a false `{ valid: true }`.
+     */
+    verifyAudit(): { valid: boolean; brokenAt?: number; length: number } | null {
+        if (!this.auditing || !this.auditing.available) return null;
+        return this.auditing.rsm.verifyAudit();
+    }
+
+    /**
+     * The current head of the rebuilt audit hash-chain (the last entry's hash), or
+     * `null` if verification is unavailable. Equals the server's audit head once the
+     * replica has caught up — proving it re-derived the SAME chain the node holds.
+     */
+    auditHead(): string | null {
+        if (!this.auditing || !this.auditing.available) return null;
+        const log = this.auditing.rsm.getAuditLog();
+        return log.length > 0 ? log[log.length - 1].hash : null;
+    }
+
+    /** The rebuilt audit entries, or `null` if verification is unavailable. */
+    getAuditLog(): AuditEntry[] | null {
+        if (!this.auditing || !this.auditing.available) return null;
+        return this.auditing.rsm.getAuditLog();
+    }
+
     // ---- connection lifecycle ----
 
     private connect(): void {
@@ -174,11 +304,10 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
     // ---- applying the stream ----
 
     private handleSnapshot(snap: StreamSnapshot): void {
-        // The stream carries the replicated-state-machine snapshot; an edge replica
-        // only needs the application state slice to restore its local view.
-        const data = snap.data as { state?: unknown } | undefined;
-        const state = data && typeof data === 'object' && 'state' in data ? data.state : snap.data;
-        this.app.restore(state);
+        // The applier owns how the snapshot lands: the default takes the application
+        // state slice; the auditing one restores the full RSM snapshot (state + audit
+        // + lastHash) so it can rebuild and verify the hash-chain.
+        this.applier.restore(snap.data);
         this.appliedIndex = snap.lastIncludedIndex;
         this.logger?.('edge replica bootstrapped from snapshot', { index: snap.lastIncludedIndex });
         this.afterApply();
@@ -192,12 +321,9 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
         // mid-stream. The cursor simply advances to each entry the server sends us.
         if (item.index <= this.appliedIndex) return;
 
-        const command = item.entry.command;
-        // Control commands (NOOP/CONFIG) have no application effect — advance past
-        // them just like the server's replicated state machine does.
-        if (!isControlCommand(command)) {
-            this.app.apply(command as C);
-        }
+        // The applier knows whether to skip control commands and whether to chain the
+        // audit hash; pass the absolute index so the auditing applier can record it.
+        this.applier.applyEntry(item.index, item.entry);
         this.appliedIndex = item.index;
         this.afterApply();
     }

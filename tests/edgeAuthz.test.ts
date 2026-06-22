@@ -4,7 +4,7 @@ import { AddressInfo } from 'net';
 import { createApp } from '../src/app';
 import { RaftNode } from '../src/consensus/raftNode';
 import { LocalTransport } from '../src/consensus/transport';
-import { Book, BookCommand, buildAddCommand } from '../src/models/book';
+import { Book, BookCommand, buildAddCommand, buildBorrowCommand } from '../src/models/book';
 import { BookStateMachine } from '../src/models/bookStateMachine';
 import { buildBookStreamGuard } from '../src/models/bookStreamGuard';
 import { EdgeReplica } from '../src/edge/edgeReplica';
@@ -107,5 +107,28 @@ describe('EdgeReplica authorization + partial replication (ADR-0023)', () => {
         replica.start();
         await waitFor(() => replica!.isCaughtUp() && local.size() === 3, 5000);
         expect(local.getAll().map((b) => b.isbn).sort()).toEqual(['a1', 'a2', 'p1']);
+    });
+
+    it('does not double-apply pre-connect history on a scoped from-scratch stream', async () => {
+        // A non-idempotent command (BORROW) committed BEFORE the scoped client
+        // connects: the bootstrap must materialize state at the head, not replay the
+        // entries on top of it. With the bug, the scoped replica re-applied BORROW
+        // and diverged (copies one lower than the server).
+        const add = buildAddCommand({ title: 'Multi', author: 'a', publisher: 'Acme Press', isbn: 'm1', copies: 3 });
+        await node.submit(add);
+        await node.submit(buildBorrowCommand(add.book.id, 'alice')); // server: copies 3 -> 2
+
+        const local = new BookStateMachine();
+        replica = new EdgeReplica<BookCommand, Book>({
+            app: local,
+            source: new HttpStreamSource(url, { token: 'acme' }),
+        });
+        replica.start();
+        await waitFor(() => replica!.isCaughtUp() && local.get(add.book.id) !== undefined, 5000);
+        await new Promise((r) => setTimeout(r, 100)); // let any erroneous replay land
+
+        // The replica must match the server's copies exactly (2), not 1.
+        expect(local.get(add.book.id)!.copies).toBe(node.app.get(add.book.id)!.copies);
+        expect(local.get(add.book.id)!.copies).toBe(2);
     });
 });
