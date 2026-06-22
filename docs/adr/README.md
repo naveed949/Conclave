@@ -35,6 +35,7 @@ supersedes the old one rather than editing history.
 | [0020](./0020-multi-raft-sharding.md) | Multi-Raft sharding for write scaling | Proposed |
 | [0021](./0021-pluggable-bft-consensus-seam.md) | Pluggable BFT consensus — the seam, and why it is not built | Proposed |
 | [0022](./0022-joint-consensus-membership.md) | Dynamic cluster membership via joint consensus | Accepted |
+| [0023](./0023-edge-read-replicas-in-the-browser.md) | Edge read replicas in the browser | Proposed |
 
 ## Template
 
