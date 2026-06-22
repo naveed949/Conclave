@@ -55,12 +55,12 @@ export class HttpStreamSource<C extends AppCommand = AppCommand> implements LogS
             (res) => {
                 if (res.statusCode === 401 || res.statusCode === 403) {
                     res.resume();
-                    if (!closed) handlers.onError(new Error(`stream unauthorized (HTTP ${res.statusCode})`));
+                    fail(new Error(`stream unauthorized (HTTP ${res.statusCode})`));
                     return;
                 }
                 if (res.statusCode !== 200) {
                     res.resume(); // drain
-                    if (!closed) handlers.onError(new Error(`stream HTTP ${res.statusCode}`));
+                    fail(new Error(`stream HTTP ${res.statusCode}`));
                     return;
                 }
                 handlers.onOpen?.();
@@ -79,8 +79,10 @@ export class HttpStreamSource<C extends AppCommand = AppCommand> implements LogS
                 // reconnect. A clean server close emits `end`; an abrupt reset
                 // (RST / socket.destroy) emits `aborted`/`close` WITHOUT `end`. We
                 // must report the abrupt case too, or the replica silently stalls.
-                // `fail()` collapses these (and a late `close` after `end`) to a
-                // single onError, and is a no-op after an intentional `close()`.
+                // `aborted` is deprecated since Node 17 but still fires; `close`
+                // covers the abrupt path on newer runtimes — `fail()` collapses the
+                // overlap (and a late `close` after `end`) to a single onError, and
+                // is a no-op after an intentional `close()`.
                 res.on('end', () => fail(new Error('stream ended')));
                 res.on('aborted', () => fail(new Error('stream aborted')));
                 res.on('close', () => fail(new Error('stream closed')));
