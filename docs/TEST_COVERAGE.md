@@ -6,6 +6,44 @@ This is an assessment of where the test suite is strong, where it is thin, and a
 prioritized list of concrete additions. Numbers come from
 `npx jest --coverage` (Istanbul) over `src/`.
 
+## Resolution — all six areas addressed
+
+Every gap below has been worked through (commits on this branch). Result: the
+suite grew **236 → 273 tests**, and coverage is now enforced in CI.
+
+| Scope | Before (stmt/branch) | After (stmt/branch) |
+|---|---|---|
+| **All files** | 85.5 / 70.6 | **88.6 / 73.7** |
+| `src/platform` | 81.5 / 56.5 | **99.4 / 91.9** |
+| `src/controllers` | 72.2 / 55.9 | **85.2 / 79.4** |
+| `src/routes` | 76.1 / 69.4 | **88.3 / 83.3** |
+| `src/edge` | 82.0 / 69.3 | **83.7 / 75.5** |
+
+What changed, by area:
+
+1. **Sandbox vs. coverage instrumentation + CI gate.** `compileReducer` now binds
+   a no-op sink for Istanbul's injected `cov_<hash>` counters, so sandboxed
+   reducers run under `--coverage` instead of throwing. Added `collectCoverageFrom`
+   + a `coverageThreshold` gate and a `test:coverage` script; CI runs it on a
+   Node 20.x **and** 22.x matrix. (`tests/runtime/sandbox.test.ts` gained
+   regression tests.)
+2. **Leader forwarding** — new `tests/forward.test.ts` (`forward.ts` 18% → 100%).
+3. **Route/controller error paths** — new `tests/httpRouting.test.ts` (follower
+   421, X-Forwarded-By anti-loop, strong reads, membership admin routes, app
+   health/metrics endpoints).
+4. **raftNode failure branches** — new `tests/raftMetrics.test.ts` (leader
+   per-peer lag series + reset after a member is removed).
+5. **Edge replica resilience** — new `tests/edgeResilience.test.ts` (reconnect/
+   resume/idempotency via a controllable fake stream source).
+6. **Platform/wiring** — new `tests/logger.test.ts` (`logger.ts` 0% → ~100%).
+
+Two branches were deliberately left (they need fault injection that risks
+flakiness): the read-barrier 2 s timeout (`waitForApplied`) and the raw HTTP/
+EventSource stream-source socket internals (covered end-to-end by the edge
+integration suites). The original analysis follows.
+
+---
+
 ## Headline numbers
 
 | Scope | % Stmts | % Branch | % Funcs | % Lines |

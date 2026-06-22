@@ -25,10 +25,10 @@ module.exports = {
     // line/branch figures sit a little lower than the bulk of the per-file ones.
     coverageThreshold: {
         global: {
-            statements: 80,
-            branches: 65,
-            functions: 80,
-            lines: 82,
+            statements: 86,
+            branches: 71,
+            functions: 86,
+            lines: 88,
         },
     },
 };
