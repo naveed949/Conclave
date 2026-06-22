@@ -7,6 +7,7 @@ import { getPort, loadRaftConfig } from './consensus/config';
 import { createLogger } from './platform/logger';
 import { metrics } from './platform/metrics';
 import { BookStateMachine } from './models/bookStateMachine';
+import { buildBookStreamGuard, buildSignedBookStreamGuard } from './models/bookStreamGuard';
 
 dotenv.config();
 
@@ -24,7 +25,29 @@ const node = new RaftNode(
 // Refresh Raft gauges whenever /metrics is scraped.
 metrics.registerCollector(() => node.collectMetrics());
 
-const app = createApp(node, { logger, metrics });
+// Per-client authorization + partial replication for the edge read stream
+// (ADR-0023). With STREAM_TOKEN_SECRET set, use cryptographically-signed, scoped,
+// short-lived tokens (M26): mint them with `yarn mint-token`. Otherwise fall back
+// to the demo token→scope registry from STREAM_TOKENS (e.g. "reader=*,acme=Acme
+// Press"), defaulting to a single public `demo=*` token so the worked example
+// runs out of the box.
+const streamGuard = process.env.STREAM_TOKEN_SECRET
+    ? buildSignedBookStreamGuard(process.env.STREAM_TOKEN_SECRET)
+    : buildBookStreamGuard(process.env.STREAM_TOKENS);
+
+// Protect the node from slow / abundant edge-stream consumers (M27). Both knobs
+// fall back to safe defaults in the route layer when the env var is unset/invalid.
+const parsePositiveInt = (raw: string | undefined): number | undefined => {
+    if (!raw) return undefined;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+};
+const streamLimits = {
+    maxClients: parsePositiveInt(process.env.STREAM_MAX_CLIENTS),
+    maxBufferBytes: parsePositiveInt(process.env.STREAM_MAX_BUFFER_BYTES),
+};
+
+const app = createApp(node, { logger, metrics, streamGuard, streamLimits });
 const PORT = getPort();
 
 const server = app.listen(PORT, () => {

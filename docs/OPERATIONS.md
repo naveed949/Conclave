@@ -153,3 +153,50 @@ Each scenario maps to a real failure mode:
 The suite uses generous timers and `--detectOpenHandles --forceExit`; every node
 is `node.stop()`-ed and every server `server.close()`-ed in teardown to avoid
 leaked handles.
+
+## Edge read replicas in production (ADR-0023)
+
+`GET /raft/stream` lets read-only, non-voting clients (browser or Node) tail the
+committed log and serve reads locally (see `examples/edge-replica/`). Running it
+in production:
+
+- **Authentication.** The stream is gated by a `StreamGuard`. Set
+  `STREAM_TOKEN_SECRET` to gate it with **cryptographically-signed, scoped,
+  short-lived tokens** (M26): the book server builds a guard
+  (`buildSignedBookStreamGuard`) that verifies a JWT-shaped HS256 token under that
+  secret and derives the scope from its `scope` claim (`*` for all books, else a
+  publisher). Mint tokens with `STREAM_TOKEN_SECRET=… yarn mint-token "<scope>"
+  [ttlSeconds]` and hand them to clients; keep the secret out of the repo and
+  rotate it. Without `STREAM_TOKEN_SECRET`, the server falls back to the demo
+  `STREAM_TOKENS` registry (e.g. `STREAM_TOKENS="reader=*,acme=Acme Press"`) of
+  *guessable* tokens — fine for the worked example, not for production. The seam
+  (`createApp({ streamGuard })`) is identical either way. Without a guard at all
+  the stream is open — only acceptable on a trusted network.
+- **Token transport.** The Node client sends `Authorization: Bearer <token>`. The
+  browser's native `EventSource` cannot set headers, so the token rides the URL
+  (`?token=`), which can leak via logs/referrers — always serve over **TLS/`wss`**
+  and mint **short-lived** signed tokens (a small `ttlSeconds`), and prefer a
+  cookie or a token-exchange endpoint.
+- **Scaling reads.** Any node serves the stream (reads are local, ADR-0006), so
+  point edge clients at **followers** or a dedicated read tier and keep the voting
+  set small. `raft_stream_subscribers` (per node) tracks active replicas — alert
+  on imbalance and on a node carrying too many connections.
+- **Partial replication.** A `ScopedFilter` restricts both the snapshot and the
+  live feed to a client's scope; out-of-scope entries are never sent (the cursor
+  still advances, so the client stays current). Scope membership is per-connection.
+- **Compaction outrunning a slow client.** If a client falls behind the snapshot
+  boundary, it reconnects and the server re-bootstraps it from a fresh snapshot —
+  automatic, but a very slow client re-downloads state.
+- **Slow / abundant consumers (M27).** The node protects itself two ways. A
+  **per-node connection cap** (`STREAM_MAX_CLIENTS`, default 10000) rejects a new
+  `/raft/stream` connection with **HTTP 503 + `Retry-After`** once the node is at
+  capacity (checked after auth, so a rejected token never consumes a slot). A
+  **backpressure drop** tears a connection down when its server-side send buffer
+  (`res.writableLength`) exceeds `STREAM_MAX_BUFFER_BYTES` (default 1 MiB) — a slow
+  consumer is dropped instead of buffering unboundedly; it reconnects and resumes
+  from its applied index. Watch `raft_stream_rejected_total` and
+  `raft_stream_dropped_total` (per node) alongside the `raft_stream_subscribers`
+  gauge. Still **put a reverse proxy with per-connection limits in front** and cap
+  fan-out per node — the in-process limits are a backstop, not a substitute.
+- **Known limits (see ADR-0023 → Implementation status).** Client-side audit-chain
+  verification is not yet wired (the stream ships application state only).

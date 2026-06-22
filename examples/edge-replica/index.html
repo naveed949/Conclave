@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Edge read replica — live library</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font: 15px/1.5 system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+        p.lede { color: #888; margin-top: 0; }
+        .bar { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0; }
+        input { padding: 0.4rem 0.5rem; border: 1px solid #8888; border-radius: 6px; font: inherit; }
+        button { padding: 0.4rem 0.8rem; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font: inherit; cursor: pointer; }
+        #status { font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 6px; }
+        #status.ok { background: #16a34a22; color: #16a34a; }
+        #status.warn { background: #d9770622; color: #d97706; }
+        #meta { color: #888; font-size: 0.85rem; }
+        table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+        th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #8882; }
+        th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+        td.empty { color: #888; text-align: center; padding: 1.5rem; }
+        form.add { display: grid; grid-template-columns: repeat(5, 1fr) auto; gap: 0.5rem; margin: 1rem 0; }
+        fieldset { border: 1px solid #8884; border-radius: 8px; padding: 0.75rem 1rem; }
+        legend { color: #888; font-size: 0.85rem; padding: 0 0.4rem; }
+    </style>
+</head>
+<body>
+    <h1>📚 Edge read replica</h1>
+    <p class="lede">
+        A read-only replica running <em>in this page</em>: it tails a cluster node's committed-log
+        stream (<code>/raft/stream</code>), applies committed commands with the <strong>same
+        <code>BookStateMachine</code> the server runs</strong> (compiled via <code>yarn build:browser</code>),
+        and serves reads from memory — updating live as new writes commit (ADR-0023).
+    </p>
+
+    <div class="bar">
+        <label>Node <input id="node" size="26" /></label>
+        <label>Token <input id="token" size="10" value="demo" /></label>
+        <button id="connect">Reconnect</button>
+        <span id="status" class="warn">…</span>
+        <span id="meta"></span>
+    </div>
+    <p class="lede" style="font-size:0.85rem">
+        Try a scoped token: run the node with
+        <code>STREAM_TOKENS="demo=*,acme=Acme Press"</code> and connect with token
+        <code>acme</code> to see only that publisher's books (ADR-0023 partial replication).
+    </p>
+
+    <fieldset>
+        <legend>Add a book (a write — forwarded to the leader; watch it stream back here)</legend>
+        <form id="addForm" class="add">
+            <input id="title" placeholder="Title" required />
+            <input id="author" placeholder="Author" required />
+            <input id="publisher" placeholder="Publisher" />
+            <input id="isbn" placeholder="ISBN" required />
+            <input id="copies" type="number" min="1" value="1" placeholder="Copies" />
+            <button type="submit">Add</button>
+        </form>
+    </fieldset>
+
+    <table>
+        <thead>
+            <tr><th>Title</th><th>Author</th><th>ISBN</th><th>Copies</th><th>Borrowed by</th></tr>
+        </thead>
+        <tbody id="books"></tbody>
+    </table>
+
+    <script type="module" src="./app.js"></script>
+</body>
+</html>
