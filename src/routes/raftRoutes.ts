@@ -42,6 +42,77 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
         res.json(node.status());
     });
 
+    // ---- committed-log read stream (ADR-0023: edge read replicas) ----
+    //
+    // Server-Sent Events stream of the committed log, served from THIS node's
+    // local, eventually-consistent state (ADR-0006) — any node can serve it, so
+    // read serving fans out across the cluster and, via a browser EventSource,
+    // past it. A consumer connects with `?fromIndex=N` (the last index it has);
+    // we bootstrap it from the snapshot if its entries were compacted away, replay
+    // the committed tail, then live-tail new commits. The consumer is a read-only,
+    // non-voting learner — it never participates in consensus.
+    //
+    // Events: `snapshot` { lastIncludedIndex, lastIncludedTerm, members, data },
+    //         `entry`    { index, entry },
+    //         `caughtup` { index }  (caller has replayed through the live head).
+    router.get('/stream', (req, res) => {
+        const fromIndex = Math.max(0, Number.parseInt(String(req.query.fromIndex ?? '0'), 10) || 0);
+
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            // Defeat proxy buffering so events flush promptly.
+            'X-Accel-Buffering': 'no',
+        });
+        // Tell an EventSource client how long to wait before reconnecting.
+        res.write('retry: 2000\n\n');
+
+        const send = (event: string, data: unknown): void => {
+            res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        };
+
+        // The whole setup below runs synchronously in one tick, so no new commit
+        // can interleave between the catch-up read and the subscription — `cursor`
+        // is a consistent handoff point and the `onCommitted` guard dedupes the seam.
+        let cursor = fromIndex;
+
+        // Bootstrap from the snapshot if the consumer's next entry was compacted away
+        // (or it is brand new and a snapshot exists). Otherwise tail from where it left off.
+        if (node.needsSnapshot(fromIndex)) {
+            const snap = node.getStreamSnapshot();
+            if (snap) {
+                send('snapshot', snap);
+                cursor = snap.lastIncludedIndex;
+            }
+        }
+
+        // Replay the already-committed tail the consumer hasn't seen.
+        for (const item of node.getCommittedEntries(cursor)) {
+            send('entry', item);
+            cursor = item.index;
+        }
+        send('caughtup', { index: cursor });
+
+        // Live-tail: forward each newly-committed entry, skipping anything already
+        // replayed above (the synchronous seam) and refusing to leave a gap.
+        const unsubscribe = node.onCommitted((index, entry) => {
+            if (index <= cursor) return;
+            send('entry', { index, entry });
+            cursor = index;
+        });
+
+        // Keepalive comments stop idle intermediaries from dropping the connection.
+        const keepalive = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+
+        const close = (): void => {
+            clearInterval(keepalive);
+            unsubscribe();
+        };
+        req.on('close', close);
+        res.on('close', close);
+    });
+
     // ---- cluster membership administration (Raft dissertation §4) ----
 
     router.get('/members', (_req, res) => {
