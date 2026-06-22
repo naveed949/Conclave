@@ -8,6 +8,11 @@ module.exports = {
     moduleDirectories: ['node_modules', 'src'],
     testMatch: ['**/*.test.ts'],
     verbose: true,
+    // Reporters used when --coverage is passed: a concise summary for CI logs,
+    // the per-file table, and lcov (coverage/lcov.info + an HTML report) which CI
+    // uploads as an artifact.
+    coverageReporters: ['text-summary', 'text', 'lcov'],
+    coverageDirectory: 'coverage',
     // What coverage is measured over (only when --coverage is passed). Exclude
     // pure type/wiring entry points that carry no testable logic of their own.
     collectCoverageFrom: [
