@@ -134,3 +134,6 @@ dist
 
 # Compiled browser SDK for the edge-replica example (build with: yarn build:browser)
 examples/edge-replica/lib/
+
+# Claude Code tooling (agent worktrees, local state)
+.claude/
