@@ -29,6 +29,9 @@ tests** and coverage to **~90.4% stmt / 76.7% branch / 90.7% func / 92.3% line**
   determinism of replay. Reproducible via `SEED=<n>`.
 - **CI**: coverage is now emitted as lcov + an uploaded artifact per Node leg, and
   the global threshold floor was ratcheted to 88/74/88/90.
+- **Mutation testing (opt-in)**: `yarn test:mutation` runs Stryker (dev-only,
+  scoped, not in the CI gate) to measure test *effectiveness*, not just reach. The
+  initial `canonical.ts` run scored ~94%. See [ADR-0024](./adr/0024-opt-in-mutation-testing.md).
 
 **Known remaining gap (intentional):** the 2s `READ_BARRIER_TIMEOUT` branch in
 `RaftNode.waitForApplied` is still not unit-tested. `lastApplied` is incremented
