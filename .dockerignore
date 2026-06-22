@@ -1,0 +1,16 @@
+# Keep the build context small and the image clean.
+node_modules
+dist
+data
+.git
+.gitignore
+tests
+coverage
+*.log
+docs
+deploy
+docker-compose*.yml
+Dockerfile
+.dockerignore
+.env
+.env.*
