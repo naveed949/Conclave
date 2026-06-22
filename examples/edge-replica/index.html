@@ -34,11 +34,17 @@
     </p>
 
     <div class="bar">
-        <label>Node <input id="node" size="28" /></label>
+        <label>Node <input id="node" size="26" /></label>
+        <label>Token <input id="token" size="10" value="demo" /></label>
         <button id="connect">Reconnect</button>
         <span id="status" class="warn">…</span>
         <span id="meta"></span>
     </div>
+    <p class="lede" style="font-size:0.85rem">
+        Try a scoped token: run the node with
+        <code>STREAM_TOKENS="demo=*,acme=Acme Press"</code> and connect with token
+        <code>acme</code> to see only that publisher's books (ADR-0023 partial replication).
+    </p>
 
     <fieldset>
         <legend>Add a book (a write — forwarded to the leader; watch it stream back here)</legend>

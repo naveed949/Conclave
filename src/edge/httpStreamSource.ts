@@ -15,12 +15,19 @@ import { LogStreamSource, StreamHandlers } from './types';
  * Browsers use the native `EventSource` instead — see `eventSourceStreamSource.ts`.
  */
 export class HttpStreamSource<C extends AppCommand = AppCommand> implements LogStreamSource<C> {
+    private readonly token?: string;
+
     /**
      * @param baseUrl Base URL of any cluster node (e.g. `http://127.0.0.1:3001`).
      *   A follower works fine — reads are local and eventually consistent, so the
      *   stream fans read serving out across the cluster.
+     * @param opts.token Bearer token for an authorized/scoped stream (ADR-0023).
+     *   Sent as `Authorization: Bearer <token>`; required when the node has a
+     *   StreamGuard configured.
      */
-    constructor(private readonly baseUrl: string) {}
+    constructor(private readonly baseUrl: string, opts: { token?: string } = {}) {
+        this.token = opts.token;
+    }
 
     connect(fromIndex: number, handlers: StreamHandlers<C>): () => void {
         const url = new URL('/raft/stream', this.baseUrl);
@@ -30,10 +37,18 @@ export class HttpStreamSource<C extends AppCommand = AppCommand> implements LogS
         let closed = false;
         let buffer = '';
 
+        const headers: Record<string, string> = { Accept: 'text/event-stream' };
+        if (this.token) headers.Authorization = `Bearer ${this.token}`;
+
         const req = client.get(
             url,
-            { headers: { Accept: 'text/event-stream' } },
+            { headers },
             (res) => {
+                if (res.statusCode === 401 || res.statusCode === 403) {
+                    res.resume();
+                    if (!closed) handlers.onError(new Error(`stream unauthorized (HTTP ${res.statusCode})`));
+                    return;
+                }
                 if (res.statusCode !== 200) {
                     res.resume(); // drain
                     if (!closed) handlers.onError(new Error(`stream HTTP ${res.statusCode}`));

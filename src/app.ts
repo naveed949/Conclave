@@ -1,9 +1,11 @@
 import express, { Application, NextFunction, Request, Response } from 'express';
 import cors from 'cors';
+import { BookCommand } from './models/book';
 import { BookNode } from './models/bookStateMachine';
 import { Logger } from './platform/logger';
 import { MetricsRegistry } from './platform/metrics';
 import { requestContextMiddleware, getContext } from './platform/requestContext';
+import { StreamGuard } from './edge/streamGuard';
 import bookRoutes from './routes/bookRoutes';
 import raftRoutes from './routes/raftRoutes';
 import auditRoutes from './routes/auditRoutes';
@@ -11,6 +13,12 @@ import auditRoutes from './routes/auditRoutes';
 export interface AppDeps {
     logger?: Logger;
     metrics?: MetricsRegistry;
+    /**
+     * Optional per-client authorization + partial replication for the edge read
+     * stream (`GET /raft/stream`, ADR-0023). When set, a stream connection must
+     * present a valid token and only receives its authorized scope.
+     */
+    streamGuard?: StreamGuard<BookCommand>;
 }
 
 /**
@@ -20,7 +28,7 @@ export interface AppDeps {
  */
 export function createApp(node: BookNode, deps: AppDeps = {}): Application {
     const app: Application = express();
-    const { logger, metrics } = deps;
+    const { logger, metrics, streamGuard } = deps;
 
     app.use(express.json());
     app.use(cors());
@@ -48,7 +56,7 @@ export function createApp(node: BookNode, deps: AppDeps = {}): Application {
     });
 
     app.use('/books', bookRoutes(node));
-    app.use('/raft', raftRoutes(node));
+    app.use('/raft', raftRoutes(node, streamGuard));
     app.use('/audit', auditRoutes(node));
 
     // Liveness: process is up.

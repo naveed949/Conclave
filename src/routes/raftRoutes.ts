@@ -4,6 +4,7 @@ import { StateMachine } from '../consensus/stateMachine';
 import { AppCommand, CommandMeta } from '../consensus/types';
 import { getContext } from '../platform/requestContext';
 import { forwardToLeader, isForwarded } from '../platform/forward';
+import { StreamGuard, ScopedFilter, extractStreamToken } from '../edge/streamGuard';
 
 /**
  * Internal cluster endpoints: peer RPCs, membership admin, and a status view.
@@ -13,9 +14,15 @@ import { forwardToLeader, isForwarded } from '../platform/forward';
  * `RpcHandler` surface) which are Raft-shaped and would be replaced *differently*
  * by a BFT engine. It is therefore intentionally typed to the concrete
  * {@link RaftNode}, NOT the engine-agnostic {@link Consensus} seam (ADR-0021).
+ *
+ * `streamGuard` (optional) enforces per-client authorization + partial
+ * replication on `GET /raft/stream` (ADR-0023). When omitted the stream is open
+ * and unfiltered (dev/trusted use); when supplied, a connection must present a
+ * valid token and only ever receives its authorized scope.
  */
 export default function raftRoutes<C extends AppCommand, T, SM extends StateMachine<C, T>>(
     node: RaftNode<C, T, SM>,
+    streamGuard?: StreamGuard<C>,
 ) {
     const router = express.Router();
 
@@ -58,6 +65,18 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
     router.get('/stream', (req, res) => {
         const fromIndex = Math.max(0, Number.parseInt(String(req.query.fromIndex ?? '0'), 10) || 0);
 
+        // Authorize + scope the connection (ADR-0023 prereq 3). With a guard, an
+        // invalid/absent token is rejected and the snapshot + entry feed are
+        // restricted to the client's scope; without one, the stream is open.
+        let filter: ScopedFilter<C> | null = null;
+        if (streamGuard) {
+            filter = streamGuard.authorize(extractStreamToken(req));
+            if (!filter) {
+                res.status(401).json({ message: 'Unauthorized stream' });
+                return;
+            }
+        }
+
         res.writeHead(200, {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache, no-transform',
@@ -82,24 +101,34 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
         if (node.needsSnapshot(fromIndex)) {
             const snap = node.getStreamSnapshot();
             if (snap) {
-                send('snapshot', snap);
+                if (filter) {
+                    // Restrict the bootstrap state to the client's scope, and drop the
+                    // RSM internals (audit/dedup) — a scoped client gets state only.
+                    const scopedState = filter.filterSnapshotState((snap.data as { state?: unknown }).state);
+                    send('snapshot', { ...snap, data: { state: scopedState } });
+                } else {
+                    send('snapshot', snap);
+                }
                 cursor = snap.lastIncludedIndex;
             }
         }
 
-        // Replay the already-committed tail the consumer hasn't seen.
+        // Replay the already-committed tail. The cursor advances past EVERY entry
+        // (so the client stays "current"), but only IN-SCOPE entries are sent.
         for (const item of node.getCommittedEntries(cursor)) {
-            send('entry', item);
+            if (!filter || filter.includes(item.entry)) send('entry', item);
             cursor = item.index;
         }
         send('caughtup', { index: cursor });
 
-        // Live-tail: forward each newly-committed entry, skipping anything already
-        // replayed above (the synchronous seam) and refusing to leave a gap.
+        // Live-tail: advance the cursor past each newly-committed entry, forwarding
+        // only the in-scope ones. (SSE rides one ordered TCP connection, so no
+        // in-scope entry is dropped mid-stream; on reconnect the client resumes
+        // from its applied index and the server replays from there.)
         const unsubscribe = node.onCommitted((index, entry) => {
             if (index <= cursor) return;
-            send('entry', { index, entry });
             cursor = index;
+            if (!filter || filter.includes(entry)) send('entry', { index, entry });
         });
 
         // Keepalive comments stop idle intermediaries from dropping the connection.

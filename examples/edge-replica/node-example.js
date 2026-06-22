@@ -8,21 +8,24 @@
  *
  * Run:
  *   yarn build
- *   node examples/edge-replica/node-example.js http://localhost:3001
+ *   node examples/edge-replica/node-example.js http://localhost:3001 demo
  *
  * (Start a node first, e.g. `yarn build && node dist/server.js`, or use the
- *  docker-compose cluster and point at http://localhost:3001.)
+ *  docker-compose cluster and point at http://localhost:3001. The token defaults
+ *  to the server's built-in `demo` (all books); pass a scoped token to see only
+ *  that slice — ADR-0023 partial replication.)
  */
 
 const { EdgeReplica, HttpStreamSource } = require('../../dist');
 const { BookStateMachine } = require('../../dist/models/bookStateMachine');
 
 const url = process.argv[2] || 'http://localhost:3001';
+const token = process.argv[3] || 'demo';
 
 const app = new BookStateMachine();
 const replica = new EdgeReplica({
     app,
-    source: new HttpStreamSource(url),
+    source: new HttpStreamSource(url, { token }),
     logger: (msg, meta) => console.error(`[edge] ${msg}`, meta ?? ''),
 });
 

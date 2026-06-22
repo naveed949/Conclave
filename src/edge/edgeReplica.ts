@@ -141,7 +141,12 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
             onEntry: (item) => this.handleEntry(item),
             onCaughtUp: (idx) => {
                 if (!this.caughtUp) this.caughtUp = true;
+                // The server has streamed every in-scope entry through `idx`, so we
+                // are current through that absolute index even if some were filtered
+                // out — advance the cursor (efficient resume + read-your-writes).
+                if (idx > this.appliedIndex) this.appliedIndex = idx;
                 this.logger?.('edge replica caught up', { index: idx });
+                this.afterApply();
             },
             onError: (err) => {
                 this.logger?.('edge stream error', { error: err.message });
@@ -180,18 +185,12 @@ export class EdgeReplica<C extends AppCommand, T = unknown> {
     }
 
     private handleEntry(item: StreamEntry<C>): void {
-        // Idempotent: ignore anything we've already applied (e.g. a reconnect replay).
+        // Idempotent + monotonic: ignore anything at or below our cursor (a reconnect
+        // replay). We do NOT require strictly contiguous indices: a scoped stream
+        // legitimately skips out-of-scope entries (ADR-0023 partial replication), and
+        // SSE rides one ordered TCP connection so an in-scope entry is never dropped
+        // mid-stream. The cursor simply advances to each entry the server sends us.
         if (item.index <= this.appliedIndex) return;
-        // A gap means we somehow skipped entries (dropped frame / bad resume): drop
-        // the connection and reconnect from appliedIndex, which re-bootstraps cleanly.
-        if (item.index !== this.appliedIndex + 1) {
-            this.logger?.('edge stream gap; re-bootstrapping', {
-                expected: this.appliedIndex + 1,
-                got: item.index,
-            });
-            this.scheduleReconnect();
-            return;
-        }
 
         const command = item.entry.command;
         // Control commands (NOOP/CONFIG) have no application effect — advance past
