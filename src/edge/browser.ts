@@ -13,6 +13,9 @@
 
 export { EdgeReplica } from './edgeReplica';
 export type { EdgeReplicaOptions } from './edgeReplica';
+// Browser-safe async SHA-256 (WebCrypto) backing client-side audit verification.
+export { webcryptoSha256Hex } from './sha256';
+export type { Sha256Hex } from './sha256';
 export { EventSourceStreamSource } from './eventSourceStreamSource';
 export type { LogStreamSource, StreamHandlers, StreamSnapshot, StreamEntry } from './types';
 

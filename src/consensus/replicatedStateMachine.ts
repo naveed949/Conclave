@@ -1,8 +1,7 @@
 import { createHash } from 'crypto';
+import { auditEntryPayload, GENESIS_HASH } from './auditChain';
 import { StateMachine } from './stateMachine';
 import { AppCommand, ApplyResult, AuditEntry, LogEntry } from './types';
-
-const GENESIS_HASH = '0'.repeat(64);
 
 /** Default cap on the idempotency dedup cache (number of remembered requestIds). */
 export const DEFAULT_DEDUP_LIMIT = 10_000;
@@ -104,8 +103,7 @@ export class ReplicatedStateMachine<C extends AppCommand, T = unknown> {
     }
 
     private hashOf(r: AuditEntry): string {
-        const payload = `${r.prevHash}|${r.index}|${r.term}|${r.type}|${r.actor}|${r.requestId}|${r.timestamp}|${r.status}`;
-        return createHash('sha256').update(payload).digest('hex');
+        return createHash('sha256').update(auditEntryPayload(r)).digest('hex');
     }
 
     // ---- audit access ----

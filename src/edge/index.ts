@@ -5,6 +5,12 @@
 
 export { EdgeReplica } from './edgeReplica';
 export type { EdgeReplicaOptions } from './edgeReplica';
+// Browser-safe async SHA-256 hex (WebCrypto) used for client-side audit
+// verification, plus the shared audit-hash payload format (single source of truth
+// with the server's ReplicatedStateMachine).
+export { webcryptoSha256Hex } from './sha256';
+export type { Sha256Hex } from './sha256';
+export { GENESIS_HASH, auditEntryPayload } from '../consensus/auditChain';
 export { HttpStreamSource } from './httpStreamSource';
 export { EventSourceStreamSource } from './eventSourceStreamSource';
 export type { EventSourceLike, EventSourceCtor, MessageEventLike } from './eventSourceStreamSource';

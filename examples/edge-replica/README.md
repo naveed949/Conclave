@@ -86,11 +86,14 @@ Reads are eventually consistent by default. After a write commits at index *i*
 (the leader returns it), `await replica.waitForIndex(i)` before reading the
 affected view so the user sees their own change — see `EdgeReplica.waitForIndex`.
 
-## Audit verification (M28, Node, full streams)
+## Audit verification (M28/M29, browser + Node, full streams)
 
 On an **unfiltered** (no-`StreamGuard`) stream the bootstrap snapshot carries the
-audit data, so a Node replica can re-derive the tamper-evident hash-chain the
-server maintains and verify it end to end. Opt in with `verifyAudit: true`:
+audit data, so a replica can re-derive the tamper-evident hash-chain the server
+maintains and verify it end to end — **in the browser as well as Node**. The chain
+is recomputed with async **WebCrypto** (`globalThis.crypto.subtle`, available in
+both browsers and Node 20+), so `verifyAudit()`/`auditHead()` are now async. Opt in
+with `verifyAudit: true`:
 
 ```js
 const replica = new EdgeReplica({
@@ -101,17 +104,17 @@ const replica = new EdgeReplica({
 replica.start();
 await replica.waitForIndex(i); // catch up
 
-const result = replica.verifyAudit(); // { valid, brokenAt?, length } — or null
-console.log(result.valid, replica.auditHead()); // head equals the node's audit head
+const result = await replica.verifyAudit(); // { valid, brokenAt?, length } — or null
+console.log(result.valid, await replica.auditHead()); // head equals the node's audit head
 ```
 
-`auditHead()` of a caught-up replica equals the node's server-side audit head,
-proving the client re-derived the *same* chain — a forged history would fail to
-verify. Two caveats:
+`await auditHead()` of a caught-up replica equals the node's server-side audit head,
+proving the client re-derived the *same* chain (the hash payload format is shared
+with the server, so the two cannot drift) — a forged history would fail to verify.
+The hasher is injectable via `auditHasher` (default `webcryptoSha256Hex`). One
+caveat remains:
 
 - **Scoped streams can't verify.** With a `StreamGuard` the scoped snapshot strips
-  the audit (authz vs. a uniform log), so `verifyAudit()`/`auditHead()` return
-  `null` — verification is *unavailable*, never a false "valid".
-- **Browser is future work.** The chain uses Node `crypto` (sync); a browser needs
-  async WebCrypto. The browser SDK still reads and converges — it just can't yet
-  verify.
+  the audit (authz vs. a uniform log), so `await verifyAudit()`/`await auditHead()`
+  resolve `null` — verification is *unavailable*, never a false "valid". This still
+  requires an **unfiltered** stream.

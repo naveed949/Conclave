@@ -165,26 +165,36 @@ Observability: `raft_stream_subscribers` gauges active edge replicas per node.
   `raft_stream_dropped_total` (per node) observe both.
 
 - **M28 — client-side audit verification (FULL streams, Node).** An opt-in
-  `new EdgeReplica({ app, source, verifyAudit: true })` applies the committed-log
-  stream through a `ReplicatedStateMachine`, re-deriving the same SHA-256 audit
-  hash-chain the server maintains. `verifyAudit()` recomputes the chain and reports
-  `{ valid, brokenAt?, length }`; `auditHead()`/`getAuditLog()` expose the rebuilt
-  chain. A caught-up replica's `auditHead()` equals the node's server-side head,
-  delivering the ADR's **end-to-end tamper-evidence** pro: a forged history fails to
-  verify on the client. Two boundaries are deliberate:
+  `new EdgeReplica({ app, source, verifyAudit: true })` re-derives the same SHA-256
+  audit hash-chain the server maintains as it applies the committed-log stream.
+  `verifyAudit()` recomputes the chain and reports `{ valid, brokenAt?, length }`;
+  `auditHead()`/`getAuditLog()` expose the rebuilt chain. A caught-up replica's
+  `auditHead()` equals the node's server-side head, delivering the ADR's
+  **end-to-end tamper-evidence** pro: a forged history fails to verify on the client.
+  (M28 derived the chain with Node `crypto`, so it was Node-only — superseded by M29.)
   - **Unavailable on scoped/partial streams.** A `StreamGuard` strips audit/dedup
     from the (scoped) bootstrap snapshot — the uniform-log-vs-authz tension — so the
     client cannot re-derive the chain. The server sends the scoped client an
     audit-stripped bootstrap snapshot as an explicit marker, and `verifyAudit()`
     returns `null` (verification *unavailable*) rather than a false `{ valid: true }`.
-  - **Browser remains future work.** The chain uses Node `crypto` (synchronous);
-    a browser must re-derive it with async WebCrypto. The verifying applier is
-    therefore Node-only for now; `EventSourceStreamSource` clients still read and
-    converge, they just cannot yet verify.
 
-**Deferred / production hardening** (intentionally out of scope here): browser-side
-audit-chain verification (needs async WebCrypto — the chain currently uses Node
-`crypto`, sync) and verification on scoped/partial streams (the audit is stripped
-from a scoped snapshot, so the chain is not re-derivable there). Node-side
-verification on full streams is implemented (M28 above). See `docs/OPERATIONS.md`
-→ "Edge read replicas in production".
+- **M29 — browser audit verification (WebCrypto).** Verification now runs in the
+  browser too. The hash-chain is re-derived with **async WebCrypto**
+  (`globalThis.crypto.subtle`, present in both browsers and Node 20+), so the edge
+  replica pulls in no Node `crypto` and the browser bundle (`edge/browser.js`) is
+  free of Node builtins again (M28 had regressed it by value-importing
+  `ReplicatedStateMachine`). The audit-hash *payload format* is a single shared
+  module (`consensus/auditChain.ts` → `auditEntryPayload`/`GENESIS_HASH`) that BOTH
+  the server's `ReplicatedStateMachine` and the client import, so the two chains
+  cannot drift. Because WebCrypto is async, `verifyAudit()`/`auditHead()` now return
+  promises; the hasher is injectable (`auditHasher`, default `webcryptoSha256Hex`).
+  A caught-up full-stream replica's `await auditHead()` equals the server head
+  byte-for-byte, proving the WebCrypto re-derivation matches the server's Node-crypto
+  chain.
+
+**Deferred / production hardening** (intentionally out of scope here): verification
+on scoped/partial streams — the audit is stripped from a scoped (`StreamGuard`)
+snapshot, so the chain is not re-derivable there and `verifyAudit()` reports
+`null` (*unavailable*) rather than a false success. Browser and Node audit
+verification on FULL streams is implemented (M28/M29 above). See
+`docs/OPERATIONS.md` → "Edge read replicas in production".
