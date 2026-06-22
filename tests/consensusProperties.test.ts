@@ -78,9 +78,14 @@ async function submitToLeader(nodes: BookNode[], cmd: BookCommand): Promise<bool
                 await leader.submit(cmd);
                 return true;
             } catch (err) {
-                // NotLeader (stepped down mid-submit) or a stalled commit during a
-                // re-election is transient under churn — re-find the leader and retry.
-                void err;
+                // Transient under churn: the leader stepped down mid-submit
+                // (NotLeaderError) or the leader we awaited was crashed (its pending
+                // entries reject with 'node stopped'). Re-find the leader and retry.
+                // Any OTHER error is a real failure and must surface — never let a
+                // genuine regression hide as a silently-retried low-commit run.
+                if (!(err instanceof NotLeaderError) && (err as Error).message !== 'node stopped') {
+                    throw err;
+                }
             }
         }
         await new Promise((r) => setTimeout(r, 15));
@@ -254,7 +259,9 @@ async function runScenario(seed: number, size: number): Promise<void> {
 }
 
 describe('Consensus safety invariants (generative)', () => {
-    jest.setTimeout(30000);
+    // Generous headroom: an iteration can chain several 3-4s settle waits, and CI
+    // boxes are slower than dev. The real timing is bounded by the fast test timers.
+    jest.setTimeout(45000);
 
     // A fixed base seed keeps CI runs reproducible while still covering many
     // distinct randomized scenarios. Override with SEED=<n> to replay one case.
