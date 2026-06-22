@@ -101,6 +101,7 @@ node.start();
 | `GET` | `/metrics` | Prometheus metrics (raft + HTTP) |
 | `GET` | `/health` | Liveness + node status |
 | `GET` | `/ready` | Readiness (200 once a leader is known, else 503) |
+| `GET` | `/raft/stream` | Server-Sent Events stream of the committed log (`?fromIndex=N`) — for edge read replicas (ADR-0023) |
 | `GET` | `/raft/status` | Node role, term, leader, log/commit indices, members |
 | `GET` | `/raft/members` | Current cluster configuration (voting members) |
 | `POST` | `/raft/members` | Add a voting node `{ id, url }` (leader-routed) |
@@ -116,6 +117,19 @@ node, eventually consistent). Add `?consistency=strong` (or header
 ReadIndex barrier (leadership confirmed via a heartbeat quorum) so the response
 reflects every write committed before the read — at the cost of one round-trip,
 and it fails with `421` if the leader can't confirm a quorum. See ADR-0014.
+
+### Edge read replicas (ADR-0023)
+
+Read serving can fan out *past* the cluster: `GET /raft/stream?fromIndex=N` is a
+Server-Sent Events feed of the committed log (snapshot handoff → committed tail →
+live tail), served from **any** node. The `EdgeReplica` SDK (`src/edge/`) tails it
+in Node or the browser, applies committed commands to a local copy of the *same*
+`StateMachine`, and answers reads from memory with no round-trip — updating live as
+writes commit. It is a read-only, non-voting learner (it never votes, acks, or
+writes). Read-your-writes is available via `EdgeReplica.waitForIndex(i)`. See the
+worked example (browser + Node) under [`examples/edge-replica/`](./examples/edge-replica/).
+Scoped/partial replication and per-client authorization (the prerequisite for
+multi-tenant use) are future work — see ADR-0023.
 
 ## Built-in platform concerns
 

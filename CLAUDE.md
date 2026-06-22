@@ -49,6 +49,12 @@ NODE_ID=node1 PORT=3001 PEERS="node2@http://localhost:3002,node3@http://localhos
   `StateMachine` for books + its command builders (not part of the framework).
 - `src/controllers`, `src/routes`, `src/app.ts` — thin HTTP adapter over the node
   for the book example (audit/raft routes are generic over any node).
+- `src/edge/` — **edge read replica SDK (ADR-0023):** `EdgeReplica` tails a node's
+  committed-log stream (`GET /raft/stream`, served by any node) and applies commits
+  to a local `StateMachine` for local reads (Node `HttpStreamSource` / browser
+  `EventSourceStreamSource`). Read-only, non-voting. The streaming primitives live
+  on `RaftNode` (`onCommitted`/`getCommittedEntries`/`getStreamSnapshot`); worked
+  demo in `examples/edge-replica/`.
 - `src/server.ts` — wires a node (with `BookStateMachine`) from env and starts it.
 - `src/index.ts` — public library surface (embedded-library use).
 - `tests/` — `consensus`, `bookApi`, `platform`, `snapshot`, `readBarrier`,
