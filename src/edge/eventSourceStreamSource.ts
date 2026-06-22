@@ -35,8 +35,14 @@ export type EventSourceCtor = new (url: string) => EventSourceLike;
  */
 export class EventSourceStreamSource<C extends AppCommand = AppCommand> implements LogStreamSource<C> {
     private readonly ctor: EventSourceCtor;
+    private readonly token?: string;
 
-    constructor(private readonly baseUrl: string, eventSourceCtor?: EventSourceCtor) {
+    /**
+     * @param opts.token Bearer token for an authorized/scoped stream (ADR-0023).
+     *   The native `EventSource` cannot set headers, so it rides the URL as
+     *   `?token=` — prefer a short-lived token (see `extractStreamToken`).
+     */
+    constructor(private readonly baseUrl: string, eventSourceCtor?: EventSourceCtor, opts: { token?: string } = {}) {
         const ctor =
             eventSourceCtor ??
             (globalThis as unknown as { EventSource?: EventSourceCtor }).EventSource;
@@ -44,11 +50,13 @@ export class EventSourceStreamSource<C extends AppCommand = AppCommand> implemen
             throw new Error('No EventSource available; pass one to EventSourceStreamSource');
         }
         this.ctor = ctor;
+        this.token = opts.token;
     }
 
     connect(fromIndex: number, handlers: StreamHandlers<C>): () => void {
         const sep = this.baseUrl.includes('?') ? '&' : '?';
-        const url = `${this.baseUrl.replace(/\/$/, '')}/raft/stream${sep}fromIndex=${fromIndex}`;
+        const tokenParam = this.token ? `&token=${encodeURIComponent(this.token)}` : '';
+        const url = `${this.baseUrl.replace(/\/$/, '')}/raft/stream${sep}fromIndex=${fromIndex}${tokenParam}`;
         const es = new this.ctor(url);
         let closed = false;
 

@@ -89,7 +89,7 @@ export type { ShardHandle, ShardNode } from './runtime/shardRouter';
 // application state machine that tails a node's committed-log stream
 // (GET /raft/stream) and serves reads locally — in Node or the browser. See
 // src/edge/ and the worked example under examples/edge-replica/.
-export { EdgeReplica, HttpStreamSource, EventSourceStreamSource } from './edge';
+export { EdgeReplica, HttpStreamSource, EventSourceStreamSource, extractStreamToken } from './edge';
 export type {
     EdgeReplicaOptions,
     LogStreamSource,
@@ -99,4 +99,6 @@ export type {
     EventSourceCtor,
     EventSourceLike,
     MessageEventLike,
+    StreamGuard,
+    ScopedFilter,
 } from './edge';

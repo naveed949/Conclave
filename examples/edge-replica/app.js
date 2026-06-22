@@ -68,8 +68,11 @@ function applyCommand(cmd) {
 function connect() {
     disconnect();
     const base = $('node').value.replace(/\/$/, '');
-    // Reconnect must resume from where we are, so the fromIndex rides the URL.
-    es = new EventSource(`${base}/raft/stream?fromIndex=${appliedIndex}`);
+    // The native EventSource can't set headers, so the token rides the URL
+    // (?token=). In production prefer a short-lived token / cookie. Reconnect must
+    // resume from where we are, so fromIndex rides the URL too.
+    const token = encodeURIComponent($('token').value.trim());
+    es = new EventSource(`${base}/raft/stream?fromIndex=${appliedIndex}&token=${token}`);
     setStatus('connecting…');
 
     es.addEventListener('snapshot', (e) => {
