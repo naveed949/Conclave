@@ -137,3 +137,8 @@ examples/edge-replica/lib/
 
 # Claude Code tooling (agent worktrees, local state)
 .claude/
+
+# Stryker mutation testing output
+reports/
+.stryker-tmp/
+stryker.log

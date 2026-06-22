@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Opt-in mutation testing (ADR-0024). NOT part of the default test/CI gate. Run: `yarn test:mutation`. Scoped narrowly by default to keep runs fast on a POC; widen `mutate` to assess other modules. `coverageAnalysis: perTest` only runs the tests that cover each mutant.",
+  "packageManager": "yarn",
+  "testRunner": "jest",
+  "jest": {
+    "projectType": "custom",
+    "configFile": "jest.config.js"
+  },
+  "coverageAnalysis": "perTest",
+  "tsconfigFile": "tsconfig.json",
+  "mutate": [
+    "src/runtime/canonical.ts"
+  ],
+  "reporters": ["clear-text", "progress"],
+  "thresholds": {
+    "high": 90,
+    "low": 75,
+    "break": null
+  }
+}

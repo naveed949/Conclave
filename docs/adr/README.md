@@ -36,6 +36,7 @@ supersedes the old one rather than editing history.
 | [0021](./0021-pluggable-bft-consensus-seam.md) | Pluggable BFT consensus — the seam, and why it is not built | Proposed |
 | [0022](./0022-joint-consensus-membership.md) | Dynamic cluster membership via joint consensus | Accepted |
 | [0023](./0023-edge-read-replicas-in-the-browser.md) | Edge read replicas in the browser | Accepted |
+| [0024](./0024-opt-in-mutation-testing.md) | Opt-in mutation testing (Stryker), dev-only | Accepted |
 
 ## Template
 
