@@ -27,17 +27,21 @@ module.exports = {
         '!src/moduleServer.ts',
         '!src/edge/browser.ts',
     ],
-    // Floor to stop coverage from regressing. Set just below the current numbers
-    // so it ratchets up over time rather than blocking on day one. Sandboxed
-    // reducer bodies run inside a vm and are not seen by the instrumenter (their
-    // injected counters are no-op'd — see src/runtime/sandbox.ts), so global
-    // line/branch figures sit a little lower than the bulk of the per-file ones.
+    // Floor to stop coverage from regressing, set just below the current aggregate
+    // (stmts ~90.4 / branches ~76.7 / funcs ~90.7 / lines ~92.3). A single global
+    // bucket is deliberate: jest's per-path/glob thresholds SUBTRACT their files
+    // from the global bucket, so adding directory floors would shift the global
+    // number unpredictably as code moves — a tightened global floor is the robust
+    // regression guard. Sandboxed reducer bodies run inside a vm and are invisible
+    // to the instrumenter (their injected counters are no-op'd — see
+    // src/runtime/sandbox.ts), which holds the global figures a touch below the
+    // bulk of the per-file ones.
     coverageThreshold: {
         global: {
-            statements: 86,
-            branches: 71,
-            functions: 86,
-            lines: 88,
+            statements: 88,
+            branches: 74,
+            functions: 88,
+            lines: 90,
         },
     },
 };
