@@ -224,6 +224,59 @@ const SANDBOX_SETUP = `
 `;
 
 /**
+ * Coverage tools (Istanbul/`nyc`, as used by `jest --coverage`) rewrite every
+ * instrumented function body to call a per-file counter, e.g.
+ * `cov_15m9dncfb6().f[1]++` / `(cov_15m9dncfb6().s[5]++, expr)`. Because the
+ * sandbox compiles a reducer from `fn.toString()`, that injected counter
+ * identifier becomes a FREE global reference inside the vm context — where it
+ * does not exist — so an otherwise-pure reducer would throw `ReferenceError`
+ * purely as an artifact of running under coverage (and the apply path would
+ * surface it as a 500). We detect those counter identifiers and bind each to a
+ * harmless no-op sink so instrumented reducers still execute deterministically.
+ *
+ * Only names matching Istanbul's `cov_<hash>` shape are stubbed, so this never
+ * widens the sandbox surface for a reducer's own free identifiers — a banned
+ * global like `Date` is untouched and still throws.
+ */
+const COVERAGE_COUNTER_RE = /\bcov_[0-9a-zA-Z_$]+/g;
+
+/**
+ * Bind a no-op sink for each coverage-counter identifier referenced by `source`.
+ * MUST run BEFORE `SANDBOX_SETUP` deletes `Proxy` from the context — the sink is
+ * a single Proxy that absorbs any call/get/set/construct and returns itself, so
+ * `cov_x().f[1]++`, `cov_x().b[2][0]++`, etc. are all harmless no-ops. The sink
+ * itself survives `SANDBOX_SETUP` because its bound names are not banned globals.
+ */
+function installCoverageStubs(context: vm.Context, source: string): void {
+    const names = Array.from(new Set(source.match(COVERAGE_COUNTER_RE) ?? []));
+    if (names.length === 0) return;
+    vm.runInContext(
+        `(() => {
+            // A single self-returning Proxy absorbs the counter's whole access
+            // shape — call (cov_x()), property (.f/.s/.b), and index ([i][j]).
+            // It coerces to 0 for the well-known conversion hooks so the trailing
+            // '++' (which does ToNumber on the leaf) succeeds instead of throwing
+            // 'Cannot convert object to primitive value'.
+            const sink = new Proxy(function () {}, {
+                get(_t, prop) {
+                    if (prop === Symbol.toPrimitive) return () => 0;
+                    if (prop === 'valueOf') return () => 0;
+                    if (prop === 'toString') return () => '0';
+                    return sink;
+                },
+                set() { return true; },
+                apply() { return sink; },
+                construct() { return sink; },
+            });
+            for (const name of ${JSON.stringify(names)}) {
+                globalThis[name] = sink;
+            }
+        })();`,
+        context,
+    );
+}
+
+/**
  * Detect whether a stringified reducer is a STANDALONE expression we can wrap in
  * parentheses and evaluate — i.e. an arrow function (`(s, i) => ...`) or a
  * `function` expression (`function (s) { ... }`, named or anonymous). Method
@@ -272,6 +325,10 @@ export function compileReducer(source: string): CompiledReducer {
     // them absent). After setup, a banned global referenced in the reducer body
     // throws `ReferenceError`.
     const context = vm.createContext({});
+    // Bind no-op stubs for any coverage-counter identifiers BEFORE the setup
+    // script removes `Proxy`, so a reducer instrumented by `jest --coverage`
+    // still runs instead of throwing `ReferenceError` on `cov_<hash>`.
+    installCoverageStubs(context, source);
     vm.runInContext(SANDBOX_SETUP, context);
 
     // Evaluate the reducer expression and stash it on the context as `__reducer`.
