@@ -35,7 +35,16 @@ export class HttpStreamSource<C extends AppCommand = AppCommand> implements LogS
         const client = url.protocol === 'https:' ? https : http;
 
         let closed = false;
+        let streamDone = false;
         let buffer = '';
+
+        // Report stream termination exactly once (until an intentional close()),
+        // regardless of which of end/aborted/close/error fires first or repeats.
+        const fail = (err: Error): void => {
+            if (closed || streamDone) return;
+            streamDone = true;
+            handlers.onError(err);
+        };
 
         const headers: Record<string, string> = { Accept: 'text/event-stream' };
         if (this.token) headers.Authorization = `Bearer ${this.token}`;
@@ -66,15 +75,19 @@ export class HttpStreamSource<C extends AppCommand = AppCommand> implements LogS
                         dispatchFrame(frame, handlers);
                     }
                 });
-                res.on('end', () => {
-                    if (!closed) handlers.onError(new Error('stream ended'));
-                });
+                // Surface every way the stream can terminate so the EdgeReplica can
+                // reconnect. A clean server close emits `end`; an abrupt reset
+                // (RST / socket.destroy) emits `aborted`/`close` WITHOUT `end`. We
+                // must report the abrupt case too, or the replica silently stalls.
+                // `fail()` collapses these (and a late `close` after `end`) to a
+                // single onError, and is a no-op after an intentional `close()`.
+                res.on('end', () => fail(new Error('stream ended')));
+                res.on('aborted', () => fail(new Error('stream aborted')));
+                res.on('close', () => fail(new Error('stream closed')));
             },
         );
 
-        req.on('error', (err) => {
-            if (!closed) handlers.onError(err);
-        });
+        req.on('error', (err) => fail(err));
 
         return () => {
             closed = true;
