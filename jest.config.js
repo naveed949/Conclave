@@ -7,6 +7,10 @@ module.exports = {
     },
     moduleDirectories: ['node_modules', 'src'],
     testMatch: ['**/*.test.ts'],
+    // Never discover tests inside git worktrees the tooling parks under .claude/
+    // (they contain a full copy of this suite, which would multiply discovery).
+    testPathIgnorePatterns: ['/node_modules/', '<rootDir>/.claude/'],
+    modulePathIgnorePatterns: ['<rootDir>/.claude/'],
     verbose: true,
     // Reporters used when --coverage is passed: a concise summary for CI logs,
     // the per-file table, and lcov (coverage/lcov.info + an HTML report) which CI
