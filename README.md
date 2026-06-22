@@ -168,6 +168,16 @@ recorded as a **hash-chained** entry (`{ actor, requestId, timestamp, prevHash,
 hash }`); altering any past entry breaks the chain (`GET /audit/verify`), and
 because it's replicated across a majority it's tamper-evident cluster-wide.
 
+## Running a cluster / Operations
+
+For a one-command **3-node Docker cluster** with a Prometheus + Grafana metrics
+stack, membership-change recipes, strong-read examples, and how the fault-injection
+(chaos) test maps to real failure modes, see **[`docs/OPERATIONS.md`](./docs/OPERATIONS.md)**:
+
+```bash
+docker compose up --build   # nodes on :3001–:3003, Prometheus :9090, Grafana :3000
+```
+
 ## Running a cluster locally
 
 Each node is configured entirely by environment variables (see `.env.example`):

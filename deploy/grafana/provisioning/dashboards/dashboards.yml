@@ -1,0 +1,13 @@
+# Load any dashboard JSON dropped into /var/lib/grafana/dashboards on boot.
+apiVersion: 1
+
+providers:
+  - name: raft-dashboards
+    orgId: 1
+    folder: Raft
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

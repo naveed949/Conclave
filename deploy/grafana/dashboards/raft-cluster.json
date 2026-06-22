@@ -1,0 +1,138 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "title": "Raft Cluster",
+  "tags": ["raft", "consensus"],
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cluster leadership (raft_is_leader)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "custom": { "drawStyle": "line", "stepAfter": true } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "raft_is_leader", "legendFormat": "{{node}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Cluster size (raft_cluster_size)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "max(raft_cluster_size)", "legendFormat": "members" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Commit progress (raft_commit_index / raft_last_applied)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "raft_commit_index", "legendFormat": "commit {{node}}" },
+        { "refId": "B", "expr": "raft_last_applied", "legendFormat": "applied {{node}}" }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Log length (raft_log_length)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "targets": [
+        { "refId": "A", "expr": "raft_log_length", "legendFormat": "{{node}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Elections (rate of raft_elections_total)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "rate(raft_elections_total[1m])", "legendFormat": "{{node}}" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Replication lag (raft_replication_lag)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "targets": [
+        { "refId": "A", "expr": "raft_replication_lag", "legendFormat": "{{node}} -> {{peer}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "HTTP throughput (rate of http_requests_total)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (node, status) (rate(http_requests_total[1m]))", "legendFormat": "{{node}} {{status}}" }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "HTTP p95 latency (http_request_duration_ms)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, node) (rate(http_request_duration_ms_bucket[5m])))", "legendFormat": "p95 {{node}}" }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Read barriers & follower reads",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "targets": [
+        { "refId": "A", "expr": "rate(raft_read_barriers_total[1m])", "legendFormat": "barriers {{node}}" },
+        { "refId": "B", "expr": "rate(raft_follower_reads_total[1m])", "legendFormat": "follower-reads {{node}}" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "State machine entries (state_machine_entries)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "targets": [
+        { "refId": "A", "expr": "state_machine_entries", "legendFormat": "{{node}}" }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Current term (raft_term)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 39 },
+      "targets": [
+        { "refId": "A", "expr": "raft_term", "legendFormat": "{{node}}" }
+      ]
+    }
+  ],
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ]
+}
