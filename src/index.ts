@@ -84,3 +84,19 @@ export type { StateStore } from './runtime/stateStore';
 export type { ProjectionDefinition, ProjectionEvent } from './runtime/projection';
 export type { SagaStep, SagaResult } from './runtime/saga';
 export type { ShardHandle, ShardNode } from './runtime/shardRouter';
+
+// ---- Edge read replicas (ADR-0023): a read-only, non-voting replica of the
+// application state machine that tails a node's committed-log stream
+// (GET /raft/stream) and serves reads locally — in Node or the browser. See
+// src/edge/ and the worked example under examples/edge-replica/.
+export { EdgeReplica, HttpStreamSource, EventSourceStreamSource } from './edge';
+export type {
+    EdgeReplicaOptions,
+    LogStreamSource,
+    StreamHandlers,
+    StreamSnapshot,
+    StreamEntry,
+    EventSourceCtor,
+    EventSourceLike,
+    MessageEventLike,
+} from './edge';
