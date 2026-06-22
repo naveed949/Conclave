@@ -207,13 +207,13 @@ describe('HttpStreamSource (Node SSE client)', () => {
         expect(rec.errors[0].message).toMatch(/stream ended/);
     });
 
-    it('does not crash on an abrupt socket reset (currently swallowed; see report)', async () => {
+    it('reports onError on an abrupt socket reset so the replica can reconnect', async () => {
         onRequest = (_req, res) => {
             res.writeHead(200, { 'Content-Type': 'text/event-stream' });
             res.write(sse('entry', { index: 1, entry: { term: 1, command: { type: 'op' } } }));
-            // Abrupt RST: Node fires 'aborted'/'close' on the response, NOT 'end' on the
-            // response nor 'error' on the request — which the source does not listen for,
-            // so no onError fires. We assert the consumer survives (no throw/crash).
+            // Abrupt RST: Node fires 'aborted'/'close' on the response, NOT 'end' on
+            // the response nor 'error' on the request. The source listens for these
+            // so the drop surfaces as onError (single fire) instead of stalling.
             setTimeout(() => res.socket?.destroy(), 20);
         };
 
@@ -222,11 +222,11 @@ describe('HttpStreamSource (Node SSE client)', () => {
         const close = source.connect(0, rec.handlers);
 
         await waitFor(() => rec.entries.length === 1, 5000);
-        // Allow the abrupt reset to propagate; with the current source it produces no event.
-        await new Promise((r) => setTimeout(r, 100));
+        await waitFor(() => rec.events.includes('error'), 5000);
         close();
         expect(rec.entries).toHaveLength(1);
-        expect(rec.events).not.toContain('error');
+        // Exactly one termination signal, despite aborted + close both firing.
+        expect(rec.errors).toHaveLength(1);
     });
 
     it('reports onError when the server ends the stream cleanly', async () => {
