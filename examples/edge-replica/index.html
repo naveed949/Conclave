@@ -29,8 +29,9 @@
     <h1>📚 Edge read replica</h1>
     <p class="lede">
         A read-only replica running <em>in this page</em>: it tails a cluster node's committed-log
-        stream (<code>/raft/stream</code>), applies committed commands to a local store, and serves
-        reads from memory — updating live as new writes commit (ADR-0023).
+        stream (<code>/raft/stream</code>), applies committed commands with the <strong>same
+        <code>BookStateMachine</code> the server runs</strong> (compiled via <code>yarn build:browser</code>),
+        and serves reads from memory — updating live as new writes commit (ADR-0023).
     </p>
 
     <div class="bar">

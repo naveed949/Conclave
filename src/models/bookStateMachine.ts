@@ -1,7 +1,7 @@
-import { RaftNode } from '../consensus/raftNode';
-import { StateMachine } from '../consensus/stateMachine';
-import { ApplyResult } from '../consensus/types';
-import { Book, BookCommand } from './book';
+import type { RaftNode } from '../consensus/raftNode';
+import type { StateMachine } from '../consensus/stateMachine';
+import type { ApplyResult } from '../consensus/types';
+import type { Book, BookCommand } from './book';
 
 /**
  * The book application as a deterministic {@link StateMachine}: an in-memory

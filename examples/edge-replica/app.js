@@ -1,123 +1,41 @@
-// Browser edge read replica (ADR-0023), zero-build.
+// Browser edge read replica (ADR-0023) — running the REAL shared code.
 //
-// This tails a cluster node's committed-log stream (GET /raft/stream) with the
-// native EventSource, applies committed book commands to an in-browser store,
-// and renders a live-updating list — reads are answered from local memory with
-// no network round-trip, and the UI reacts as new commits arrive.
-//
-// NOTE ON DETERMINISM (ADR-0023 / ADR-0003): the reducer below MUST match the
-// server's BookStateMachine.apply exactly, or the replica diverges. Here it is a
-// hand-port for a zero-build demo; in production you would compile and SHARE the
-// one StateMachine so the same code runs on the server and in every client (the
-// "determinism across client builds" hazard the ADR calls out). The Node example
-// (node-example.js) does exactly that — it runs the real BookStateMachine.
+// This imports the compiled EdgeReplica + EventSourceStreamSource + the SAME
+// BookStateMachine the server runs (built by `yarn build:browser` into ./lib/).
+// There is no hand-ported reducer here: the browser applies committed commands
+// with the identical deterministic state machine, so it cannot drift from the
+// server. Reads are answered from local memory; the view updates live as commits
+// arrive. The SDK owns reconnection/backoff and resume.
+import { EdgeReplica, EventSourceStreamSource, BookStateMachine } from './lib/edge/browser.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-const DEFAULT_NODE = params.get('node') || 'http://localhost:3001';
-$('node').value = DEFAULT_NODE;
+$('node').value = params.get('node') || 'http://localhost:3001';
+if (params.get('token')) $('token').value = params.get('token');
 
-// ---- the local replica state ----
+let replica = null;
+let app = null;
 
-/** id -> Book. The whole replicated view, served locally. */
-let books = new Map();
-let appliedIndex = 0;
-let caughtUp = false;
-let es = null;
-
-/** Faithful port of the server's BookStateMachine.apply (deterministic). */
-function applyCommand(cmd) {
-    switch (cmd.type) {
-        case 'ADD':
-            books.set(cmd.book.id, { ...cmd.book });
-            break;
-        case 'UPDATE': {
-            const b = books.get(cmd.id);
-            if (b) books.set(cmd.id, { ...b, ...cmd.fields, id: b.id });
-            break;
-        }
-        case 'DELETE':
-            books.delete(cmd.id);
-            break;
-        case 'BORROW': {
-            const b = books.get(cmd.id);
-            if (b && b.copies > 0) {
-                b.copies -= 1;
-                b.borrowedBy = cmd.borrowedBy;
-                b.borrowedDate = cmd.borrowedDate;
-                b.dueDate = cmd.dueDate;
-            }
-            break;
-        }
-        case 'RETURN': {
-            const b = books.get(cmd.id);
-            if (b && b.copies < b.totalCopies) {
-                b.copies += 1;
-                b.borrowedBy = null;
-                b.borrowedDate = null;
-                b.dueDate = null;
-            }
-            break;
-        }
-        // NOOP / CONFIG: framework control entries, no application effect.
-    }
-}
-
-// ---- streaming ----
-
-function connect() {
-    disconnect();
+function start() {
+    if (replica) replica.stop();
+    app = new BookStateMachine();
     const base = $('node').value.replace(/\/$/, '');
-    // The native EventSource can't set headers, so the token rides the URL
-    // (?token=). In production prefer a short-lived token / cookie. Reconnect must
-    // resume from where we are, so fromIndex rides the URL too.
-    const token = encodeURIComponent($('token').value.trim());
-    es = new EventSource(`${base}/raft/stream?fromIndex=${appliedIndex}&token=${token}`);
+    const token = $('token').value.trim();
+
+    // The native EventSource can't set headers, so the token rides the URL (?token=).
+    const source = new EventSourceStreamSource(base, EventSource, { token });
+    replica = new EdgeReplica({
+        app,
+        source,
+        logger: (msg) => {
+            if (msg.includes('error')) setStatus('reconnecting…');
+            else if (msg.includes('caught up')) setStatus('live');
+        },
+    });
+    replica.onChange(render);
     setStatus('connecting…');
-
-    es.addEventListener('snapshot', (e) => {
-        const snap = JSON.parse(e.data);
-        // The stream carries the replicated-state-machine snapshot; an edge replica
-        // only needs the application state slice.
-        const state = snap.data && snap.data.state ? snap.data.state : snap.data;
-        books = new Map((state || []).map((b) => [b.id, b]));
-        appliedIndex = snap.lastIncludedIndex;
-        render();
-    });
-
-    es.addEventListener('entry', (e) => {
-        const { index, entry } = JSON.parse(e.data);
-        if (index <= appliedIndex) return; // dedupe replays
-        applyCommand(entry.command);
-        appliedIndex = index;
-        render();
-    });
-
-    es.addEventListener('caughtup', (e) => {
-        caughtUp = true;
-        appliedIndex = JSON.parse(e.data).index;
-        render();
-    });
-
-    es.onopen = () => setStatus('live');
-    es.onerror = () => {
-        // EventSource auto-reconnects, but to the ORIGINAL url; close and reopen
-        // from the current appliedIndex so the resume is correct.
-        setStatus('reconnecting…');
-        const wasIndex = appliedIndex;
-        disconnect();
-        setTimeout(() => {
-            appliedIndex = wasIndex;
-            connect();
-        }, 1500);
-    };
-}
-
-function disconnect() {
-    if (es) {
-        es.close();
-        es = null;
-    }
+    replica.start();
+    render();
 }
 
 // ---- rendering ----
@@ -128,8 +46,10 @@ function setStatus(text) {
 }
 
 function render() {
-    $('meta').textContent = `appliedIndex=${appliedIndex} · ${caughtUp ? 'caught up' : 'catching up'} · ${books.size} books`;
-    const rows = [...books.values()]
+    if (!replica || !app) return;
+    $('meta').textContent = `appliedIndex=${replica.lastIndex()} · ${replica.isCaughtUp() ? 'caught up' : 'catching up'} · ${app.size()} books`;
+    const rows = app
+        .getAll()
         .sort((a, b) => a.title.localeCompare(b.title))
         .map(
             (b) => `<tr>
@@ -169,8 +89,7 @@ async function addBook(e) {
             body: JSON.stringify(body),
         });
         if (!res.ok) {
-            const msg = await res.text();
-            alert(`Write failed (${res.status}): ${msg}`);
+            alert(`Write failed (${res.status}): ${await res.text()}`);
             return;
         }
         $('addForm').reset();
@@ -180,11 +99,6 @@ async function addBook(e) {
 }
 
 $('addForm').addEventListener('submit', addBook);
-$('connect').addEventListener('click', () => {
-    appliedIndex = 0;
-    caughtUp = false;
-    books = new Map();
-    connect();
-});
+$('connect').addEventListener('click', start);
 
-connect();
+start();
