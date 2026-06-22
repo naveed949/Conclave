@@ -12,3 +12,5 @@ export type { LogStreamSource, StreamHandlers, StreamSnapshot, StreamEntry } fro
 // Per-client authorization + partial replication (ADR-0023 prereq 3).
 export { extractStreamToken } from './streamGuard';
 export type { StreamGuard, ScopedFilter } from './streamGuard';
+// Cryptographically-signed, short-lived, scoped stream tokens (M26).
+export { mintStreamToken, verifyStreamToken, createSignedTokenGuard } from './signedToken';

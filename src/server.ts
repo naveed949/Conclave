@@ -7,7 +7,7 @@ import { getPort, loadRaftConfig } from './consensus/config';
 import { createLogger } from './platform/logger';
 import { metrics } from './platform/metrics';
 import { BookStateMachine } from './models/bookStateMachine';
-import { buildBookStreamGuard } from './models/bookStreamGuard';
+import { buildBookStreamGuard, buildSignedBookStreamGuard } from './models/bookStreamGuard';
 
 dotenv.config();
 
@@ -26,10 +26,14 @@ const node = new RaftNode(
 metrics.registerCollector(() => node.collectMetrics());
 
 // Per-client authorization + partial replication for the edge read stream
-// (ADR-0023). The token→scope registry comes from STREAM_TOKENS (e.g.
-// "reader=*,acme=Acme Press"); it defaults to a single public `demo=*` token so
-// the worked example runs out of the box. Swap this for JWT verification in prod.
-const streamGuard = buildBookStreamGuard(process.env.STREAM_TOKENS);
+// (ADR-0023). With STREAM_TOKEN_SECRET set, use cryptographically-signed, scoped,
+// short-lived tokens (M26): mint them with `yarn mint-token`. Otherwise fall back
+// to the demo token→scope registry from STREAM_TOKENS (e.g. "reader=*,acme=Acme
+// Press"), defaulting to a single public `demo=*` token so the worked example
+// runs out of the box.
+const streamGuard = process.env.STREAM_TOKEN_SECRET
+    ? buildSignedBookStreamGuard(process.env.STREAM_TOKEN_SECRET)
+    : buildBookStreamGuard(process.env.STREAM_TOKENS);
 
 const app = createApp(node, { logger, metrics, streamGuard });
 const PORT = getPort();
