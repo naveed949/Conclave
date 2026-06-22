@@ -179,6 +179,28 @@ export default function raftRoutes<C extends AppCommand, T, SM extends StateMach
                 }
                 cursor = snap.lastIncludedIndex;
             }
+        } else if (filter && fromIndex === 0) {
+            // No compaction, but a SCOPED, from-scratch consumer is bootstrapped from
+            // the FULLY-MATERIALIZED scoped state at the live head (not replayed entry
+            // by entry). This both (1) gives the client its scoped view in one shot,
+            // and (2) is the audit-stripped marker that tells an audit-verifying client
+            // (M28) it is on a PARTIAL stream and must not verify the chain — without
+            // it the client would silently rebuild a bogus-but-self-consistent chain
+            // from the scoped subset. The cursor jumps to the head so those entries are
+            // NOT also replayed on top of the snapshot (which would double-apply
+            // non-idempotent commands like BORROW/RETURN and diverge the replica).
+            const head = node.getCommitIndex();
+            const liveState = node.stateMachine.snapshot().state;
+            const scopedState = filter.filterSnapshotState(liveState);
+            // lastIncludedTerm is a placeholder: this synthetic marker is not a real
+            // snapshot boundary and the edge replica doesn't consume the term.
+            send('snapshot', {
+                lastIncludedIndex: head,
+                lastIncludedTerm: 0,
+                members: node.getMembers(),
+                data: { state: scopedState },
+            });
+            cursor = head;
         }
 
         // Replay the already-committed tail. The cursor advances past EVERY entry
