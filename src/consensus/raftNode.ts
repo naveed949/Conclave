@@ -187,6 +187,12 @@ export class RaftNode<
     // Linearizable-read barriers awaiting the state machine to apply through an index.
     private readWaiters: ReadWaiter[] = [];
 
+    // Committed-entry subscribers (the read-stream / edge-replica fan-out; ADR-0023).
+    // Each is invoked, in commit order, with every entry as it is applied — a
+    // read-only, non-voting tap on the committed log. Subscribers never enter any
+    // voting set, never ack, and never affect quorum/commit; they only observe.
+    private committedListeners = new Set<(index: number, entry: LogEntry<C>) => void>();
+
     private readonly electionMinMs: number;
     private readonly electionMaxMs: number;
     private readonly heartbeatMs: number;
@@ -1238,6 +1244,10 @@ export class RaftNode<
                 if (waiter.term === entry.term) waiter.resolve(result);
                 else waiter.reject(new NotLeaderError(this.leaderId));
             }
+
+            // Fan the committed entry out to read-stream subscribers (ADR-0023).
+            // This is the live-tail feed an edge replica consumes after bootstrap.
+            this.emitCommitted(this.lastApplied, entry);
         }
         this.resolveReadWaiters();
         // Complete an INHERITED joint transition (Raft §4.3): a previous leader
@@ -1346,6 +1356,7 @@ export class RaftNode<
         m.raftSnapshotIndex.set(this.lastIncludedIndex, { node });
         m.raftDedupCacheSize.set(this.rsm.dedupCacheSize(), { node });
         m.raftClusterSize.set(this.members.size, { node });
+        m.raftStreamSubscribers.set(this.streamSubscriberCount(), { node });
         m.stateMachineEntries.set(this.rsm.size(), { node });
         // Rebuild the per-peer lag series each scrape so a removed peer (or one we
         // no longer lead) doesn't leave a stale gauge behind forever.
@@ -1354,6 +1365,101 @@ export class RaftNode<
             const last = this.lastLogIndex();
             for (const peer of this.otherMembers()) {
                 m.raftReplicationLag.set(last - (this.matchIndex.get(peer.id) ?? 0), { node, peer: peer.id });
+            }
+        }
+    }
+
+    // ---- committed-log read stream (ADR-0023: edge read replicas) ----
+    //
+    // A read-only, eventually-consistent view of the committed log, served from
+    // THIS node's local state (ADR-0006). Any node — leader or follower — can
+    // serve it, so read serving fans out across the cluster (and, via a browser
+    // SDK, past it). A consumer bootstraps from the snapshot boundary, replays the
+    // already-committed tail, then live-tails new commits via `onCommitted`. None
+    // of this participates in consensus: a stream consumer is a non-voting learner.
+
+    /** Highest committed index (the live tail's current head). */
+    getCommitIndex(): number {
+        return this.commitIndex;
+    }
+
+    /** The snapshot boundary: entries at or below this live only in the snapshot. */
+    getSnapshotIndex(): number {
+        return this.lastIncludedIndex;
+    }
+
+    /**
+     * True iff an entry the consumer still needs (everything after `afterIndex`)
+     * has already been compacted into the snapshot — so the consumer must first
+     * bootstrap from {@link getStreamSnapshot} before it can tail by entry.
+     */
+    needsSnapshot(afterIndex: number): boolean {
+        return afterIndex < this.lastIncludedIndex;
+    }
+
+    /**
+     * Committed entries with absolute index in `(afterIndex, commitIndex]` that are
+     * still in the in-memory log — the catch-up batch a freshly-connected consumer
+     * replays before live-tailing. Entries at or below the snapshot boundary are
+     * skipped (the consumer gets those from {@link getStreamSnapshot}).
+     */
+    getCommittedEntries(afterIndex: number): { index: number; entry: LogEntry<C> }[] {
+        const start = Math.max(afterIndex, this.lastIncludedIndex) + 1;
+        const out: { index: number; entry: LogEntry<C> }[] = [];
+        for (let i = start; i <= this.commitIndex; i++) {
+            const entry = this.entryAt(i);
+            if (entry) out.push({ index: i, entry });
+        }
+        return out;
+    }
+
+    /**
+     * The durable snapshot at the compaction boundary, for stream bootstrap, or
+     * `null` if nothing has been compacted yet (the whole committed log is still
+     * in memory, so a consumer can tail from index 1 with no snapshot). The `data`
+     * is the replicated state machine's snapshot (`{ state, audit, … }`); an edge
+     * replica restores its local application state from `data.state`.
+     */
+    getStreamSnapshot(): { lastIncludedIndex: number; lastIncludedTerm: number; members: PeerInfo[]; data: unknown } | null {
+        if (this.lastIncludedIndex === 0) return null;
+        const durable = this.storage.loadSnapshot();
+        if (!durable) return null;
+        return {
+            lastIncludedIndex: durable.lastIncludedIndex,
+            lastIncludedTerm: durable.lastIncludedTerm,
+            members: durable.members ?? [...this.members.values()],
+            data: durable.data,
+        };
+    }
+
+    /**
+     * Subscribe to committed entries as they are applied, in commit order, for
+     * live-tailing the read stream (ADR-0023). Returns an unsubscribe function.
+     * The subscriber is a read-only, non-voting observer: it never acks, votes, or
+     * affects commit/quorum. Listener exceptions are isolated so one slow/broken
+     * consumer can't wedge the apply loop or the other subscribers.
+     */
+    onCommitted(listener: (index: number, entry: LogEntry<C>) => void): () => void {
+        this.committedListeners.add(listener);
+        return () => {
+            this.committedListeners.delete(listener);
+        };
+    }
+
+    /** Number of active committed-log stream subscribers (for metrics/tests). */
+    streamSubscriberCount(): number {
+        return this.committedListeners.size;
+    }
+
+    private emitCommitted(index: number, entry: LogEntry<C>): void {
+        if (this.committedListeners.size === 0) return;
+        for (const listener of this.committedListeners) {
+            try {
+                listener(index, entry);
+            } catch (err) {
+                this.logger?.warn('committed-stream listener threw', {
+                    error: err instanceof Error ? err.message : String(err),
+                });
             }
         }
     }
