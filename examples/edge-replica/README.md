@@ -36,25 +36,32 @@ NODE_ID=node1 PORT=3001 node dist/server.js
 
 CORS is enabled on the node, so a browser on any origin can read the stream.
 
-## Browser demo (zero build)
+## Browser demo
 
-Open `index.html` (serve the folder over http so ES modules load):
+The page imports the **compiled, shared** SDK — the same `EdgeReplica` and
+`BookStateMachine` the server runs — so the browser applies committed commands
+with the identical deterministic state machine (no hand-port, no drift). Build it
+once, then serve the folder over http (ES modules need an http origin):
 
 ```bash
-# from the repo root, after a node is running on :3001
-npx --yes http-server examples/edge-replica -p 8080   # or: python3 -m http.server 8080 -d examples/edge-replica
-# then visit http://localhost:8080/?node=http://localhost:3001
+yarn build:browser                                   # emits examples/edge-replica/lib/ (gitignored)
+# with a node running on :3001 …
+npx --yes http-server examples/edge-replica -p 8080  # or: python3 -m http.server 8080 -d examples/edge-replica
+# then visit http://localhost:8080/?node=http://localhost:3001&token=demo
 ```
 
 Add a book in the form (a write → forwarded to the leader) and watch the row
 appear in the list **with no refresh** — it streamed back to the in-page replica.
 Open the page in two tabs to see both converge.
 
-> The browser reducer in `app.js` is a hand-port of the server's
-> `BookStateMachine.apply` for a zero-build page. In production you would compile
-> and **share** the one state machine so identical code runs everywhere — the
-> "determinism across client builds" hazard ADR-0023 calls out. The Node example
-> below does exactly that.
+The token defaults to the server's built-in `demo` (all books). To see **partial
+replication**, run the node with `STREAM_TOKENS="demo=*,acme=Acme Press"` and
+connect with token `acme` — the page then receives only that publisher's books.
+
+> `yarn build:browser` compiles `src/edge/browser.ts` to browser ESM via
+> `tsconfig.browser.json` and appends `.js` extensions (see `scripts/build-browser.js`),
+> with no extra dependency. This is the answer to ADR-0023's "determinism across
+> client builds" hazard: ship the one compiled state machine to every client.
 
 ## Node example (real shared code)
 

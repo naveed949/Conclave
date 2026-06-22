@@ -131,3 +131,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Compiled browser SDK for the edge-replica example (build with: yarn build:browser)
+examples/edge-replica/lib/
