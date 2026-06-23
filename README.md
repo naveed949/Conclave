@@ -1,5 +1,11 @@
 # Conclave
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Tests](https://img.shields.io/badge/tests-330%2B-success?logo=jest&logoColor=white)](#tests)
+[![Built on Raft](https://img.shields.io/badge/consensus-Raft-orange)](https://raft.github.io/)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/naveed949/Conclave/pulls)
+
 > *A cluster of equal peers that agree on every change — no central database, no single point of authority.*
 
 **Conclave** is a decentralized, database-free backend built on a **from-scratch
@@ -22,6 +28,30 @@ the real subject.**
 > dependencies), backed by ~8.6k lines of tests against ~9.2k lines of source, and
 > documented as a series of [Architecture Decision Records](./docs/adr/README.md).
 > See [`docs/PHILOSOPHY.md`](./docs/PHILOSOPHY.md) for the *why*.
+
+## Highlights
+
+- 🗳️ **Raft consensus from scratch** — leader election, log replication, and commit (Raft fig. 2), implemented on the Node standard library.
+- 🗜️ **Log compaction** — snapshotting + chunked InstallSnapshot keep the log bounded and catch up lagging followers.
+- 🔀 **Dynamic membership** — add/remove nodes at runtime via joint consensus (Raft §6) with dual-majority safety, no restart.
+- 🎯 **Linearizable reads** — opt-in ReadIndex barrier (`?consistency=strong`); fast, eventually-consistent local reads by default.
+- 🧾 **Tamper-evident audit trail** — the replicated log is hash-chained; altering any past entry breaks the chain.
+- 🛰️ **Edge read replicas** — a read-only Node/browser SDK tails the committed log over SSE and serves reads locally (ADR-0023).
+- 🔌 **Pluggable application** — bring your own deterministic `StateMachine`; the library book service is just the worked demo.
+- 📈 **Built-in platform** — structured logs, Prometheus metrics (incl. consensus signals), tracing, idempotency, and durable crash-consistent persistence.
+
+## Contents
+
+- [Why no database?](#why-no-database)
+- [Architecture](#architecture)
+- [Bring your own state machine](#bring-your-own-state-machine)
+- [API](#api)
+- [Edge read replicas](#edge-read-replicas-adr-0023)
+- [Built-in platform concerns](#built-in-platform-concerns)
+- [Running a cluster / Operations](#running-a-cluster--operations)
+- [Tests](#tests)
+- [Limitations](#limitations-its-a-poc)
+- **Design docs:** [Philosophy](./docs/PHILOSOPHY.md) · [ADRs](./docs/adr/README.md) · [Context](./CONTEXT.md) · [Operations](./docs/OPERATIONS.md)
 
 ## Why no database?
 
