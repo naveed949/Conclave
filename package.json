@@ -47,5 +47,6 @@
     "supertest": "^6.3.3",
     "ts-jest": "^29.1.0",
     "typescript": "^5.0.4"
-  }
+  },
+  "packageManager": "yarn@4.17.0"
 }
