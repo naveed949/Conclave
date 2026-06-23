@@ -1948,27 +1948,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"backend-poc@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "backend-poc@workspace:."
-  dependencies:
-    "@stryker-mutator/core": "npm:^9.6.1"
-    "@stryker-mutator/jest-runner": "npm:^9.6.1"
-    "@types/cors": "npm:^2.8.13"
-    "@types/express": "npm:^4.17.17"
-    "@types/jest": "npm:^29.5.1"
-    "@types/node": "npm:^20.11.0"
-    "@types/supertest": "npm:^2.0.16"
-    cors: "npm:^2.8.5"
-    dotenv: "npm:^16.0.3"
-    express: "npm:^4.18.2"
-    jest: "npm:^29.5.0"
-    supertest: "npm:^6.3.3"
-    ts-jest: "npm:^29.1.0"
-    typescript: "npm:^5.0.4"
-  languageName: unknown
-  linkType: soft
-
 "balanced-match@npm:^1.0.0":
   version: 1.0.2
   resolution: "balanced-match@npm:1.0.2"
@@ -2322,6 +2301,27 @@ __metadata:
   checksum: 10c0/c996b1cfdf95b6c90fee4dae37e332c8b6eb7d106430c17d538034c0ad9a1630cb194d2ab37293b1bdd4d779494beee7786d586a50bd9376fd6f7bcc2bd4c98f
   languageName: node
   linkType: hard
+
+"conclave@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "conclave@workspace:."
+  dependencies:
+    "@stryker-mutator/core": "npm:^9.6.1"
+    "@stryker-mutator/jest-runner": "npm:^9.6.1"
+    "@types/cors": "npm:^2.8.13"
+    "@types/express": "npm:^4.17.17"
+    "@types/jest": "npm:^29.5.1"
+    "@types/node": "npm:^20.11.0"
+    "@types/supertest": "npm:^2.0.16"
+    cors: "npm:^2.8.5"
+    dotenv: "npm:^16.0.3"
+    express: "npm:^4.18.2"
+    jest: "npm:^29.5.0"
+    supertest: "npm:^6.3.3"
+    ts-jest: "npm:^29.1.0"
+    typescript: "npm:^5.0.4"
+  languageName: unknown
+  linkType: soft
 
 "content-disposition@npm:0.5.4":
   version: 0.5.4
