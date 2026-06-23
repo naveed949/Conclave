@@ -6,6 +6,42 @@ This is an assessment of where the test suite is strong, where it is thin, and a
 prioritized list of concrete additions. Numbers come from
 `npx jest --coverage` (Istanbul) over `src/`.
 
+## Follow-up round 2 — deeper hardening
+
+A second pass (after the round-1 work below) took the suite from **273 → 347
+tests** and coverage to **~90.4% stmt / 76.7% branch / 90.7% func / 92.3% line**:
+
+- **Edge stream-source internals** (`tests/edgeStreamSource.test.ts`): drives
+  `HttpStreamSource` against a stub SSE server and `EventSourceStreamSource` via
+  an injected double — frame parsing, split frames, malformed payloads, auth/non-
+  200 responses, and every termination path. `httpStreamSource` 75→100% stmt,
+  `eventSourceStreamSource` 80→100% stmt. This surfaced a **real bug**: an abrupt
+  socket reset emitted `aborted`/`close` (not `end`), which the source ignored —
+  so the replica silently stalled instead of reconnecting. Fixed in
+  `src/edge/httpStreamSource.ts` (listen for `aborted`/`close`, single-fire guard).
+- **Runtime unit tests** (`tests/runtime/{canonical,shardRouter,keyedModule,projection}Unit.test.ts`):
+  drove `canonical.ts`, `shardRouter.ts`, `keyedModule.ts`, `projection.ts` to
+  **100%** statements and branches (from 76/74/78/64%).
+- **Generative consensus safety suite** (`tests/consensusProperties.test.ts`):
+  seeded (mulberry32, no new deps) randomized command streams + leader-crash
+  churn over LocalTransport clusters, asserting the Raft safety triple — state
+  convergence, committed-log agreement up to the shared commit index, and
+  determinism of replay. Reproducible via `SEED=<n>`.
+- **CI**: coverage is now emitted as lcov + an uploaded artifact per Node leg, and
+  the global threshold floor was ratcheted to 88/74/88/90.
+- **Mutation testing (opt-in)**: `yarn test:mutation` runs Stryker (dev-only,
+  scoped, not in the CI gate) to measure test *effectiveness*, not just reach. The
+  initial `canonical.ts` run scored ~94%. See [ADR-0024](./adr/0024-opt-in-mutation-testing.md).
+
+**Known remaining gap (intentional):** the 2s `READ_BARRIER_TIMEOUT` branch in
+`RaftNode.waitForApplied` is still not unit-tested. `lastApplied` is incremented
+*before* `apply()` (raftNode.ts), so `commitIndex` can't be held ahead of
+`lastApplied` via a throwing state machine; the only trigger is a precisely-timed
+partition of a lagging follower right after it receives a ReadIndex, which is
+inherently racy. The adjacent fail-closed paths are covered in
+`followerReads.test.ts`/`readBarrier.test.ts`. Forcing this branch cleanly would
+need a test-only seam in `src` — deferred rather than shipping a flaky timing test.
+
 ## Resolution — all six areas addressed
 
 Every gap below has been worked through (commits on this branch). Result: the
