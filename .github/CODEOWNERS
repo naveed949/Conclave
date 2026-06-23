@@ -1,0 +1,8 @@
+# Code owners for Conclave.
+#
+# @naveed949 owns the entire repository, so every pull request requires their
+# review before it can be merged into a protected branch (see branch protection
+# on `main`). Public contributors must open a PR and get this approval; the
+# repository admin can bypass and merge directly.
+
+* @naveed949
