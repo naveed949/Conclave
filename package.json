@@ -1,7 +1,7 @@
 {
-  "name": "backend-poc",
+  "name": "conclave",
   "version": "1.0.0",
-  "description": "A POC of a Raft consensus protocol in a Node/TypeScript backend, making a library book service decentralized and replicated across nodes with no central database",
+  "description": "A decentralized, database-free backend built on a from-scratch Raft consensus implementation (elections, log replication, snapshotting, joint-consensus membership, linearizable reads). The replicated log doubles as a tamper-evident audit trail.",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
@@ -14,22 +14,24 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/naveed949/backend-poc.git"
+    "url": "git+https://github.com/naveed949/Conclave.git"
   },
   "keywords": [
-    "poc",
     "backend",
     "consensus",
     "raft",
     "distributed-systems",
-    "replication"
+    "replication",
+    "decentralized",
+    "audit-trail",
+    "state-machine-replication"
   ],
   "author": "naveed949",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/naveed949/backend-poc/issues"
+    "url": "https://github.com/naveed949/Conclave/issues"
   },
-  "homepage": "https://github.com/naveed949/backend-poc#readme",
+  "homepage": "https://github.com/naveed949/Conclave#readme",
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",

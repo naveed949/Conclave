@@ -1,10 +1,27 @@
-# backend-poc
+# Conclave
 
-A proof-of-concept showing how to make a backend **decentralized** by replicating
-its state across multiple nodes with the [**Raft consensus algorithm**](https://raft.github.io/) —
-no central database. The demo application is a small **library book service**
-(add / list / update / delete / borrow / return), but the books are just a
-deterministic state machine sitting on top of the consensus layer.
+> *A cluster of equal peers that agree on every change — no central database, no single point of authority.*
+
+**Conclave** is a decentralized, database-free backend built on a **from-scratch
+[Raft consensus](https://raft.github.io/) implementation** — leader election, log
+replication, snapshotting + InstallSnapshot, joint-consensus dynamic membership,
+and opt-in linearizable reads. State is a replicated log applied to a per-node
+in-memory state machine, so every node converges to identical state through
+agreement rather than a shared store. The replicated log doubles as a
+**tamper-evident, hash-chained audit trail**, and the consensus layer ships with
+built-in observability, idempotency, and fault tolerance.
+
+The demo application is a small **library book service** (add / list / update /
+delete / borrow / return), but the books are deliberately incidental — a
+deterministic state machine riding on top of the consensus layer. **Consensus is
+the real subject.**
+
+> **Why it exists.** This is a study of distributed-systems correctness: how a
+> backend stays consistent and available when no single machine is in charge.
+> Implemented with the Node standard library only (no consensus/distributed-systems
+> dependencies), backed by ~8.6k lines of tests against ~9.2k lines of source, and
+> documented as a series of [Architecture Decision Records](./docs/adr/README.md).
+> See [`docs/PHILOSOPHY.md`](./docs/PHILOSOPHY.md) for the *why*.
 
 ## Why no database?
 

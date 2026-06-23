@@ -11,7 +11,7 @@ Companion documents:
 
 ## In one paragraph
 
-`backend-poc` is a proof-of-concept for a **decentralized backend**: a cluster of
+`Conclave` is a proof-of-concept for a **decentralized backend**: a cluster of
 equal peer nodes that agree on every change via the **Raft consensus protocol**,
 with **no shared database**. Each node holds its own in-memory state machine that
 converges by applying the same committed log entries in the same order. On top of
