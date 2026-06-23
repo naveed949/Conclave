@@ -1,0 +1,64 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1526"/>
+      <stop offset="0.55" stop-color="#0a0f1b"/>
+      <stop offset="1" stop-color="#070a12"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffae5c"/>
+      <stop offset="1" stop-color="#ff7a2f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.28" r="0.5">
+      <stop offset="0" stop-color="#1b2c4a" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#0a0f1b" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .sans { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <!-- background -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="none" stroke="#1c2740" stroke-width="2"/>
+
+  <!-- cluster motif: 3 peers, top one is leader -->
+  <g stroke="#3a4a66" stroke-width="2.5" opacity="0.9">
+    <line x1="1110" y1="158" x2="1028" y2="298"/>
+    <line x1="1110" y1="158" x2="1192" y2="298"/>
+    <line x1="1028" y1="298" x2="1192" y2="298"/>
+  </g>
+  <!-- leader -->
+  <circle cx="1110" cy="158" r="40" fill="url(#accent)"/>
+  <text x="1110" y="170" text-anchor="middle" class="sans" font-size="34" font-weight="700" fill="#1a1205">L</text>
+  <!-- followers -->
+  <circle cx="1028" cy="298" r="34" fill="#16213a" stroke="#3a4a66" stroke-width="2.5"/>
+  <text x="1028" y="308" text-anchor="middle" class="sans" font-size="26" font-weight="600" fill="#aab6c8">F</text>
+  <circle cx="1192" cy="298" r="34" fill="#16213a" stroke="#3a4a66" stroke-width="2.5"/>
+  <text x="1192" y="308" text-anchor="middle" class="sans" font-size="26" font-weight="600" fill="#aab6c8">F</text>
+
+  <!-- left accent bar -->
+  <rect x="96" y="150" width="9" height="250" rx="4" fill="url(#accent)"/>
+
+  <!-- kicker -->
+  <text x="132" y="138" class="sans" font-size="25" font-weight="700" letter-spacing="6" fill="#ff8a3d">DECENTRALIZED BACKEND &#183; RAFT CONSENSUS</text>
+
+  <!-- title -->
+  <text x="128" y="258" class="sans" font-size="118" font-weight="800" letter-spacing="-2" fill="#f5f8fc">Conclave</text>
+
+  <!-- tagline -->
+  <text x="132" y="328" class="sans" font-size="40" font-weight="600" fill="#d3dce8">Equal peers agree on every change.</text>
+  <text x="132" y="378" class="sans" font-size="29" font-weight="400" fill="#8390a4">No central database. No single point of authority.</text>
+
+  <!-- divider -->
+  <line x1="132" y1="470" x2="1148" y2="470" stroke="#1f2c47" stroke-width="2"/>
+
+  <!-- feature line -->
+  <text x="132" y="527" class="mono" font-size="20" fill="#9aa7bd">Leader election &#183; Snapshotting &#183; Dynamic membership &#183; Linearizable reads &#183; Hash-chained audit</text>
+
+  <!-- footer -->
+  <text x="132" y="582" class="mono" font-size="23" fill="#6a768c">TypeScript &#183; Node stdlib &#183; MIT</text>
+  <text x="1148" y="582" text-anchor="end" class="mono" font-size="23" fill="#6a768c">github.com/naveed949/Conclave</text>
+</svg>
